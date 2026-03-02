@@ -1,0 +1,35 @@
+# Virtual envs
+.venv
+venv
+env
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Git
+.git
+.gitignore
+
+# IDE / local
+.idea
+.vscode
+*.swp
+.env
+.env.*
+!.env.example
+
+# Tests (optional: include if you run tests in image)
+# tests/
+
+# Eval outputs (ephemeral)
+eval_results/
+
+# Misc
+*.md
+.DS_Store
