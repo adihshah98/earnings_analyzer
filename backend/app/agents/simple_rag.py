@@ -187,24 +187,14 @@ User query: {query}"""
 
 async def resolve_company_and_date(
     query: str,
-    request_company_ticker: str | None,
-    request_as_of_date: str | None,
     companies: list[dict[str, str]],
     today_iso: str,
 ) -> SimpleRAGScope:
     """Resolve scope from LLM list of (entity, date) pairs.
 
-    - If both request params are provided, use them (no LLM).
-    - Else: call LLM to get (company_ticker, date_expression) pairs.
-    - Multi-entity: resolve to (ticker, call_date) pairs for OR filter; if none found, use no filter.
+    Calls LLM to extract (company_ticker, date_expression) from the query.
+    Multi-entity: resolve to (ticker, call_date) pairs for OR filter; if none found, use no filter.
     """
-    # Request params: when both provided, use them (e.g. UI sent them)
-    if request_company_ticker and request_as_of_date:
-        return SimpleRAGScope(
-            company_ticker=request_company_ticker,
-            as_of_date=request_as_of_date,
-        )
-
     entities: list[ResolvedEntity] = []
     if companies:
         entities = await _resolve_entities_via_llm(query, companies, today_iso)
@@ -229,7 +219,7 @@ async def resolve_company_and_date(
 
     if len(entities) == 1:
         ticker, date_expression = entities[0]
-        as_of_date = request_as_of_date
+        as_of_date: str | None = None
         if date_expression is not None:
             resolved = _date_expression_to_iso(date_expression, today_iso)
             if resolved is not None:
@@ -238,12 +228,12 @@ async def resolve_company_and_date(
             as_of_date = today_iso
         return SimpleRAGScope(
             company_ticker=ticker,
-            as_of_date=as_of_date,
+            as_of_date=as_of_date or today_iso,
         )
 
     return SimpleRAGScope(
-        company_ticker=request_company_ticker,
-        as_of_date=request_as_of_date or today_iso,
+        company_ticker=None,
+        as_of_date=today_iso,
     )
 
 

@@ -3,10 +3,8 @@ export type SearchModeType = 'vector' | 'keyword' | 'hybrid'
 export interface QueryRequest {
   query: string
   session_id?: string | null
-  company_ticker?: string | null
   search_mode?: SearchModeType | null
   retrieval_threshold?: number | null
-  as_of_date?: string | null
 }
 
 export interface CitedSpan {

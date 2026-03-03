@@ -15,9 +15,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # OpenAI
+    # OpenAI (gpt-4.1-nano is fastest; set OPENAI_MODEL=gpt-4o-mini for higher quality)
     openai_api_key: str
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-4.1-nano"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 

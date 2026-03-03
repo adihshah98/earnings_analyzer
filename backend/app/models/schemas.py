@@ -24,10 +24,6 @@ class QueryRequest(BaseModel):
         default=None,
         description="Session ID for multi-turn conversations. Omit to start a new session.",
     )
-    company_ticker: str | None = Field(
-        default=None,
-        description="Scope results to a specific company (e.g. AAPL). Falls back to DEFAULT_COMPANY_TICKER in config.",
-    )
     search_mode: SearchModeType | None = Field(
         default=None,
         description="Retrieval mode: vector, keyword, or hybrid. Falls back to DEFAULT_SEARCH_MODE in config.",
@@ -37,10 +33,6 @@ class QueryRequest(BaseModel):
         ge=0.0,
         le=1.0,
         description="Min similarity for vector search (0–1). Falls back to RETRIEVAL_THRESHOLD in config.",
-    )
-    as_of_date: str | None = Field(
-        default=None,
-        description="Scope to a specific date (ISO YYYY-MM-DD) or quarter. Used by simple RAG path.",
     )
 
 

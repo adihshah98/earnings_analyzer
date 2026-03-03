@@ -20,16 +20,33 @@ from app.conversations.service import (
 )
 from app.models.schemas import AgentResponse, SourceDocument
 from app.prompts.templates import SIMPLE_RAG_SYSTEM_PROMPT
-from app.rag.embeddings import get_openai_client
-from app.rag.retriever import get_known_companies, retrieve_relevant_chunks
+from app.rag.embeddings import generate_embedding, get_openai_client
+from app.rag.retriever import (
+    get_known_companies,
+    retrieve_relevant_chunks,
+)
 
 logger = logging.getLogger(__name__)
 
 
+async def _append_conversation_turn_background(session_id: str, query: str, answer: str) -> None:
+    """Fire-and-forget: persist conversation turn without blocking the response."""
+    try:
+        await append_conversation_turn(session_id, query, answer)
+    except Exception as e:
+        logger.warning("Failed to persist conversation turn (background): %s", e)
+
+
+def _build_search_query(query: str, conversation_context: list[str] | None) -> str:
+    """Build search query with optional conversation context for retrieval."""
+    if not conversation_context:
+        return query
+    context_str = " ".join(conversation_context[-3:])
+    return f"Previous context: {context_str}. Current question: {query}".strip()
+
+
 async def _prepare_simple_rag(
     query: str,
-    request_company_ticker: str | None,
-    request_as_of_date: str | None,
     search_mode: str | None,
     retrieval_threshold: float | None,
     session_id: str | None = None,
@@ -45,12 +62,12 @@ async def _prepare_simple_rag(
         except Exception:
             return []
 
-    t0 = time.perf_counter()
     async def _get_message_history():
         if session_id:
             return await get_conversation_history(session_id)
         return []
 
+    t0 = time.perf_counter()
     companies, message_history = await asyncio.gather(
         _get_companies(),
         _get_message_history(),
@@ -58,15 +75,18 @@ async def _prepare_simple_rag(
     companies = companies or []
     logger.info("[latency] get_known_companies + get_conversation_history: %.3fs", time.perf_counter() - t0)
 
-    t0 = time.perf_counter()
-    scope = await resolve_company_and_date(
-        query=query,
-        request_company_ticker=request_company_ticker,
-        request_as_of_date=request_as_of_date,
-        companies=companies,
-        today_iso=today_iso,
+    conversation_context = (
+        get_recent_user_queries(message_history, limit=3) if message_history else None
     )
-    logger.info("[latency] resolve_company_and_date: %.3fs", time.perf_counter() - t0)
+    search_query = _build_search_query(query, conversation_context)
+
+    # Run entity resolution and embedding in parallel to reduce latency
+    t0 = time.perf_counter()
+    scope, query_embedding = await asyncio.gather(
+        resolve_company_and_date(query=query, companies=companies, today_iso=today_iso),
+        generate_embedding(search_query),
+    )
+    logger.info("[latency] resolve_company_and_date + generate_embedding (parallel): %.3fs", time.perf_counter() - t0)
 
     filter_metadata: dict[str, Any] = {}
     if scope.resolved_date_pairs:
@@ -82,9 +102,6 @@ async def _prepare_simple_rag(
     if scope.resolved_date_pairs:
         top_k = min(20, 5 * len(scope.resolved_date_pairs))
 
-    conversation_context = (
-        get_recent_user_queries(message_history, limit=3) if message_history else None
-    )
     effective_mode = search_mode or settings.default_search_mode
     threshold = (
         retrieval_threshold
@@ -100,6 +117,7 @@ async def _prepare_simple_rag(
         filter_metadata=filter_metadata,
         conversation_context=conversation_context,
         search_mode=effective_mode,
+        query_embedding=query_embedding,
     )
     logger.info("[latency] retrieve_relevant_chunks: %.3fs", time.perf_counter() - t0)
 
@@ -166,8 +184,6 @@ def _compute_cited_spans(answer: str, source_content: str) -> list[dict[str, int
 
 async def run_simple_rag(
     query: str,
-    request_company_ticker: str | None = None,
-    request_as_of_date: str | None = None,
     search_mode: str | None = None,
     retrieval_threshold: float | None = None,
     session_id: str | None = None,
@@ -175,8 +191,6 @@ async def run_simple_rag(
     """Run the simple RAG flow (non-streaming). Same as prod. Returns AgentResponse."""
     chunks, full_prompt, _ = await _prepare_simple_rag(
         query=query,
-        request_company_ticker=request_company_ticker,
-        request_as_of_date=request_as_of_date,
         search_mode=search_mode,
         retrieval_threshold=retrieval_threshold,
         session_id=session_id,
@@ -226,8 +240,6 @@ async def run_simple_rag(
 async def stream_simple_rag_or_agent(
     query: str,
     session_id: str | None,
-    request_company_ticker: str | None,
-    request_as_of_date: str | None,
     search_mode: str | None,
     retrieval_threshold: float | None,
 ):
@@ -235,8 +247,6 @@ async def stream_simple_rag_or_agent(
     t_prepare = time.perf_counter()
     chunks, full_prompt, _ = await _prepare_simple_rag(
         query=query,
-        request_company_ticker=request_company_ticker,
-        request_as_of_date=request_as_of_date,
         search_mode=search_mode,
         retrieval_threshold=retrieval_threshold,
         session_id=session_id,
@@ -299,12 +309,7 @@ async def stream_simple_rag_or_agent(
             "cited_spans": [{"start": s["start"], "end": s["end"]} for s in raw_spans],
         })
     if session_id:
-        try:
-            t0 = time.perf_counter()
-            await append_conversation_turn(session_id, query, answer)
-            logger.info("[latency] append_conversation_turn: %.3fs", time.perf_counter() - t0)
-        except Exception as e:
-            logger.warning("Failed to persist conversation turn: %s", e)
+        asyncio.create_task(_append_conversation_turn_background(session_id, query, answer))
     payload = {
         "answer": answer,
         "confidence": 0.9,

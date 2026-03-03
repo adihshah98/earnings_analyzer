@@ -17,7 +17,6 @@ def _get_request_params(request: QueryRequest):
     settings = get_settings()
     return {
         "session_id": request.session_id,
-        "company_ticker": request.company_ticker or settings.default_company_ticker,
         "search_mode": request.search_mode or settings.default_search_mode,
         "retrieval_threshold": (
             request.retrieval_threshold
@@ -38,8 +37,6 @@ async def agent_query(request: QueryRequest):
         async for event_type, payload in stream_simple_rag_or_agent(
             query=request.query,
             session_id=params["session_id"],
-            request_company_ticker=params["company_ticker"],
-            request_as_of_date=request.as_of_date,
             search_mode=params["search_mode"],
             retrieval_threshold=params["retrieval_threshold"],
         ):

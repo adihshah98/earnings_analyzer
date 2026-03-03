@@ -8,6 +8,7 @@ from uuid import UUID
 
 from typing import Any, Literal
 
+from cachetools import TTLCache
 from sqlalchemy import and_, desc, func, or_, select, text
 
 from app.config import get_settings
@@ -162,7 +163,7 @@ async def _resolve_entity_dates_batch(
     # Single query: unnest + LATERAL to resolve all pairs (column is "metadata" in DB)
     stmt = text(f"""
         WITH inputs(ticker, as_of_date) AS (
-            SELECT * FROM unnest(:tickers::text[], :as_of_dates::text[]) AS t(ticker, as_of_date)
+            SELECT * FROM unnest(CAST(:tickers AS text[]), CAST(:as_of_dates AS text[])) AS t(ticker, as_of_date)
         )
         SELECT i.ticker, l.call_date
         FROM inputs i,
@@ -267,12 +268,17 @@ async def _retrieve_vector(
     top_k: int,
     threshold: float,
     filter_metadata: dict[str, Any] | None,
+    query_embedding: list[float] | None = None,
 ) -> list[dict[str, Any]]:
-    """Retrieve chunks using vector (cosine similarity) search."""
+    """Retrieve chunks using vector (cosine similarity) search.
+
+    If query_embedding is provided, skips the embedding API call (for parallelization).
+    """
     Chunk = _get_chunk_model()
-    t0 = time.perf_counter()
-    query_embedding = await generate_embedding(search_query)
-    logger.info("[latency] generate_embedding: %.3fs", time.perf_counter() - t0)
+    if query_embedding is None:
+        t0 = time.perf_counter()
+        query_embedding = await generate_embedding(search_query)
+        logger.info("[latency] generate_embedding: %.3fs", time.perf_counter() - t0)
     cosine_dist = Chunk.embedding.cosine_distance(query_embedding)
     similarity = 1 - cosine_dist
 
@@ -413,6 +419,7 @@ async def retrieve_relevant_chunks(
     filter_metadata: dict[str, Any] | None = None,
     conversation_context: list[str] | None = None,
     search_mode: SearchMode = "hybrid",
+    query_embedding: list[float] | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve the most relevant document chunks for a query.
 
@@ -446,6 +453,7 @@ async def retrieve_relevant_chunks(
                 top_k=top_k,
                 threshold=threshold,
                 filter_metadata=filter_metadata,
+                query_embedding=query_embedding,
             )
         elif search_mode == "keyword":
             chunks = await _retrieve_keyword(
@@ -462,6 +470,7 @@ async def retrieve_relevant_chunks(
                     top_k=top_k,
                     threshold=threshold,
                     filter_metadata=filter_metadata,
+                    query_embedding=query_embedding,
                 ),
                 _retrieve_keyword(
                     query=query,
@@ -554,16 +563,31 @@ async def list_available_transcripts(
     ]
 
 
+# Process-local cache for get_known_companies (24h TTL).
+# On multi-instance deployments, each process has its own cache; no distributed cache.
+_COMPANIES_CACHE: TTLCache = TTLCache(maxsize=2, ttl=86400)  # 24 hours
+
+
 async def get_known_companies() -> list[dict[str, str]]:
     """Query distinct company tickers and names from the knowledge base.
 
-    Extracts the company name from transcript titles so the agent's system
-    prompt can be populated dynamically instead of maintaining a hardcoded list.
+    Cached for 24 hours (process-local) since companies change only on ingestion.
 
     Returns:
         Sorted list of dicts with ``ticker`` and ``name`` keys,
         e.g. ``[{"ticker": "ACME", "name": "Acme Corp"}, ...]``.
     """
+    cache_key = "companies_eval" if use_eval_chunks() else "companies"
+    if cache_key in _COMPANIES_CACHE:
+        return _COMPANIES_CACHE[cache_key]
+
+    result = await _get_known_companies_impl()
+    _COMPANIES_CACHE[cache_key] = result
+    return result
+
+
+async def _get_known_companies_impl() -> list[dict[str, str]]:
+    """Internal: query companies from DB (uncached)."""
     Chunk = _get_chunk_model()
     ticker_col = Chunk.chunk_metadata["company_ticker"].astext
     title_col = Chunk.chunk_metadata["title"].astext
