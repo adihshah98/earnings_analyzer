@@ -4,6 +4,7 @@ import logging
 from typing import Sequence
 
 import numpy as np
+from cachetools import TTLCache
 from openai import AsyncOpenAI
 
 from app.config import get_settings
@@ -11,6 +12,9 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 
 _client: AsyncOpenAI | None = None
+
+# Process-local cache for embeddings (24h TTL). Key: (normalized_text, model, dimensions).
+_EMBEDDING_CACHE: TTLCache = TTLCache(maxsize=1000, ttl=86400)
 
 
 def get_openai_client() -> AsyncOpenAI:
@@ -23,21 +27,26 @@ def get_openai_client() -> AsyncOpenAI:
 
 
 async def generate_embedding(text: str) -> list[float]:
-    """Generate an embedding for a single text string."""
+    """Generate an embedding for a single text string. Results are cached (24h TTL)."""
     settings = get_settings()
-    client = get_openai_client()
-
-    text = text.replace("\n", " ").strip()
-    if not text:
+    normalized = text.replace("\n", " ").strip()
+    if not normalized:
         return [0.0] * settings.embedding_dimensions
 
+    cache_key = (normalized, settings.embedding_model, settings.embedding_dimensions)
+    if cache_key in _EMBEDDING_CACHE:
+        return _EMBEDDING_CACHE[cache_key]
+
+    client = get_openai_client()
     response = await client.embeddings.create(
-        input=text,
+        input=normalized,
         model=settings.embedding_model,
         dimensions=settings.embedding_dimensions,
     )
 
-    return response.data[0].embedding
+    embedding = response.data[0].embedding
+    _EMBEDDING_CACHE[cache_key] = embedding
+    return embedding
 
 
 async def generate_embeddings_batch(

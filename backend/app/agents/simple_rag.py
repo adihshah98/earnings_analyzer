@@ -11,11 +11,16 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from cachetools import TTLCache
+
 from app.conversations.service import get_recent_user_queries
 from app.rag.embeddings import get_openai_client
 from app.rag.retriever import resolve_entities_to_call_dates, retrieve_relevant_chunks
 
 logger = logging.getLogger(__name__)
+
+# Entity resolution scope cache (24h TTL). Key: (query_normalized, today_iso, companies_key).
+_SCOPE_CACHE: TTLCache = TTLCache(maxsize=500, ttl=86400)
 
 # Quarter end dates (approximate): Q1 -> Mar 31, Q2 -> Jun 30, Q3 -> Sep 30, Q4 -> Dec 31
 _QUARTER_END = {"1": "03-31", "2": "06-30", "3": "09-30", "4": "12-31"}
@@ -185,6 +190,13 @@ User query: {query}"""
         return []
 
 
+def _scope_cache_key(query: str, companies: list[dict[str, str]], today_iso: str) -> tuple:
+    """Build cache key for entity resolution scope. Companies key is stable for same ticker/name set."""
+    normalized = query.strip().lower()[:500]
+    companies_key = tuple(sorted((c.get("ticker", ""), c.get("name", "")) for c in companies))
+    return (normalized, today_iso, companies_key)
+
+
 async def resolve_company_and_date(
     query: str,
     companies: list[dict[str, str]],
@@ -194,7 +206,17 @@ async def resolve_company_and_date(
 
     Calls LLM to extract (company_ticker, date_expression) from the query.
     Multi-entity: resolve to (ticker, call_date) pairs for OR filter; if none found, use no filter.
+    Results are cached (24h TTL) to reduce latency on repeated/similar queries.
     """
+    cache_key = _scope_cache_key(query, companies, today_iso)
+    if cache_key in _SCOPE_CACHE:
+        stored = _SCOPE_CACHE[cache_key]
+        return SimpleRAGScope(
+            company_ticker=stored[0],
+            as_of_date=stored[1],
+            resolved_date_pairs=stored[2],
+        )
+
     entities: list[ResolvedEntity] = []
     if companies:
         entities = await _resolve_entities_via_llm(query, companies, today_iso)
@@ -211,11 +233,13 @@ async def resolve_company_and_date(
             logger.warning("Multi-entity: no call dates found for entities %s, using no filter", entity_dates)
         else:
             logger.info("Simple RAG: %d entities -> multi-entity (single retrieval)", len(entities))
-        return SimpleRAGScope(
+        scope = SimpleRAGScope(
             company_ticker=None,
             as_of_date=None,
             resolved_date_pairs=resolved_pairs if resolved_pairs else None,
         )
+        _SCOPE_CACHE[cache_key] = (scope.company_ticker, scope.as_of_date, scope.resolved_date_pairs)
+        return scope
 
     if len(entities) == 1:
         ticker, date_expression = entities[0]
@@ -226,15 +250,19 @@ async def resolve_company_and_date(
                 as_of_date = resolved
         if not as_of_date:
             as_of_date = today_iso
-        return SimpleRAGScope(
+        scope = SimpleRAGScope(
             company_ticker=ticker,
             as_of_date=as_of_date or today_iso,
         )
+        _SCOPE_CACHE[cache_key] = (scope.company_ticker, scope.as_of_date, scope.resolved_date_pairs)
+        return scope
 
-    return SimpleRAGScope(
+    scope = SimpleRAGScope(
         company_ticker=None,
         as_of_date=today_iso,
     )
+    _SCOPE_CACHE[cache_key] = (scope.company_ticker, scope.as_of_date, scope.resolved_date_pairs)
+    return scope
 
 
 def _format_context_for_prompt(chunks: list[dict[str, Any]]) -> str:

@@ -104,11 +104,16 @@ async def _resolve_as_of_date(
 
     Because companies have different fiscal-year calendars, we normalise temporal
     queries by actual earnings-call date rather than fiscal quarter labels.
+    Results are cached (24h TTL) to reduce DB latency on repeated queries.
 
     Returns:
         List of (company_ticker, call_date) pairs — one per company that has at
         least one call on or before *as_of_date*.
     """
+    cache_key = (as_of_date, company_ticker or "", use_eval_chunks())
+    if cache_key in _DATE_RESOLUTION_CACHE:
+        return _DATE_RESOLUTION_CACHE[cache_key]
+
     Chunk = _get_chunk_model()
     ticker_col = Chunk.chunk_metadata["company_ticker"].astext
     date_col = Chunk.chunk_metadata["call_date"].astext
@@ -130,6 +135,7 @@ async def _resolve_as_of_date(
         rows = result.mappings().all()
 
     resolved = [(row["company_ticker"], row["call_date"]) for row in rows]
+    _DATE_RESOLUTION_CACHE[cache_key] = resolved
     logger.info(
         f"Resolved as_of_date={as_of_date} (ticker={company_ticker}) → {resolved}"
     )
@@ -142,7 +148,7 @@ async def _resolve_entity_dates_batch(
     """Resolve all (ticker, as_of_date_iso) pairs in a single DB query.
 
     Uses the latest call on or before as_of_date per company. Returns only pairs
-    that have a matching call in the DB.
+    that have a matching call in the DB. Results are cached (24h TTL).
 
     Args:
         entity_dates: List of (company_ticker, as_of_date_iso).
@@ -152,6 +158,10 @@ async def _resolve_entity_dates_batch(
     """
     if not entity_dates:
         return []
+
+    cache_key = (tuple(sorted(entity_dates)), use_eval_chunks())
+    if cache_key in _BATCH_DATE_RESOLUTION_CACHE:
+        return _BATCH_DATE_RESOLUTION_CACHE[cache_key]
 
     Chunk = _get_chunk_model()
     table_name = Chunk.__table__.name
@@ -184,6 +194,7 @@ async def _resolve_entity_dates_batch(
         rows = result.mappings().all()
 
     pairs = [(row["ticker"], row["call_date"]) for row in rows]
+    _BATCH_DATE_RESOLUTION_CACHE[cache_key] = pairs
     logger.info(
         "[latency] _resolve_entity_dates_batch: %.3fs (%d entities → %d pairs)",
         time.perf_counter() - t0,
@@ -566,6 +577,10 @@ async def list_available_transcripts(
 # Process-local cache for get_known_companies (24h TTL).
 # On multi-instance deployments, each process has its own cache; no distributed cache.
 _COMPANIES_CACHE: TTLCache = TTLCache(maxsize=2, ttl=86400)  # 24 hours
+
+# Date resolution caches (24h TTL) to avoid repeated DB round-trips for same date/ticker.
+_DATE_RESOLUTION_CACHE: TTLCache = TTLCache(maxsize=500, ttl=86400)
+_BATCH_DATE_RESOLUTION_CACHE: TTLCache = TTLCache(maxsize=500, ttl=86400)
 
 
 async def get_known_companies() -> list[dict[str, str]]:
