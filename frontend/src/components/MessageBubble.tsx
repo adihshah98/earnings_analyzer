@@ -1,18 +1,26 @@
+import ReactMarkdown from 'react-markdown'
 import type { ChatMessage } from '../types'
 
 type Props = {
   message: ChatMessage
-  onViewSources?: () => void
+  onToggleSources?: () => void
+  isSourcesShown?: boolean
 }
 
-export function MessageBubble({ message, onViewSources }: Props) {
+export function MessageBubble({ message, onToggleSources, isSourcesShown }: Props) {
   const isUser = message.role === 'user'
   const hasSources = !!message.sources && message.sources.length > 0
 
   return (
     <div className={`message-row ${isUser ? 'user' : 'assistant'}`}>
       <div className={`message-bubble ${isUser ? 'user' : 'assistant'}`}>
-        <div>{message.content}</div>
+        <div className="message-content">
+          {isUser ? (
+            message.content
+          ) : (
+            <ReactMarkdown>{message.content}</ReactMarkdown>
+          )}
+        </div>
         {!isUser && (
           <div className="message-meta">
             {typeof message.confidence === 'number' && (
@@ -20,9 +28,9 @@ export function MessageBubble({ message, onViewSources }: Props) {
                 Confidence {(message.confidence * 100).toFixed(0)}%
               </span>
             )}
-            {hasSources && onViewSources && (
-              <button type="button" className="view-sources-button" onClick={onViewSources}>
-                View sources ({message.sources!.length})
+            {hasSources && onToggleSources && (
+              <button type="button" className="view-sources-button" onClick={onToggleSources}>
+                {isSourcesShown ? 'Hide sources' : `View sources (${message.sources!.length})`}
               </button>
             )}
           </div>

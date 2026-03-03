@@ -1,5 +1,7 @@
 import type {
   AgentResponse,
+  ConversationHistoryEntry,
+  ConversationSessionSummary,
   QueryRequest,
   TranscriptResponse,
 } from '../types'
@@ -85,5 +87,38 @@ export async function getTranscriptByChunkId(
     { method: 'GET' },
   )
   return handleResponse<TranscriptResponse>(res)
+}
+
+/** Fetch list of conversation sessions from backend (newest first). */
+export async function getConversationSessions(): Promise<
+  ConversationSessionSummary[]
+> {
+  const res = await fetch(`${API_BASE}/conversations/sessions`, {
+    method: 'GET',
+  })
+  return handleResponse<ConversationSessionSummary[]>(res)
+}
+
+/** Fetch conversation history for a session. */
+export async function getConversationHistory(
+  sessionId: string,
+): Promise<ConversationHistoryEntry[]> {
+  const res = await fetch(
+    `${API_BASE}/conversations/${encodeURIComponent(sessionId)}/history`,
+    { method: 'GET' },
+  )
+  return handleResponse<ConversationHistoryEntry[]>(res)
+}
+
+/** Delete a conversation session on the backend. */
+export async function deleteConversation(sessionId: string): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/conversations/${encodeURIComponent(sessionId)}`,
+    { method: 'DELETE' },
+  )
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(text || `Delete failed with status ${res.status}`)
+  }
 }
 

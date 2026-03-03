@@ -5,7 +5,7 @@ import logging
 from typing import Sequence
 
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ModelRequest
-from sqlalchemy import func, nulls_last, select
+from sqlalchemy import delete, func, nulls_last, select
 
 from app.models.database import get_session
 from app.models.db_models import ConversationMessage
@@ -95,6 +95,63 @@ async def append_conversation_messages(
             session.add(row)
 
     logger.debug(f"Appended {len(messages)} messages to session {session_id}")
+
+
+async def append_conversation_turn(
+    session_id: str,
+    user_text: str,
+    assistant_text: str,
+) -> None:
+    """Append a user+assistant turn to a session. Wrapper for simple text persistence.
+
+    Args:
+        session_id: The conversation session ID.
+        user_text: The user's message text.
+        assistant_text: The assistant's response text.
+    """
+    if not session_id:
+        return
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+
+    request = ModelRequest(parts=[UserPromptPart(content=user_text)])
+    response = ModelResponse(parts=[TextPart(content=assistant_text)])
+    await append_conversation_messages(session_id, [request, response])
+
+
+async def list_sessions() -> list[tuple[str, object]]:
+    """List all conversation session IDs with their last activity time.
+
+    Returns:
+        List of (session_id, updated_at) tuples, newest first.
+    """
+    async with get_session() as session:
+        subq = (
+            select(
+                ConversationMessage.session_id,
+                func.max(ConversationMessage.created_at).label("updated_at"),
+            )
+            .group_by(ConversationMessage.session_id)
+            .subquery()
+        )
+        result = await session.execute(
+            select(subq.c.session_id, subq.c.updated_at).order_by(
+                subq.c.updated_at.desc().nulls_last()
+            )
+        )
+        return list(result.all())
+
+
+async def delete_session(session_id: str) -> None:
+    """Delete all messages for a conversation session.
+
+    Args:
+        session_id: The conversation session ID to delete.
+    """
+    if not session_id:
+        return
+    async with get_session() as session:
+        await session.execute(delete(ConversationMessage).where(ConversationMessage.session_id == session_id))
+    logger.debug(f"Deleted session {session_id}")
 
 
 async def get_conversation_history_for_api(

@@ -4,7 +4,7 @@ import { SourceCard } from './SourceCard'
 import { TranscriptModal } from './TranscriptModal'
 
 export function SourcesPanel() {
-  const { activeChat, sourcesMessageId, setSourcesTarget } = useChatContext()
+  const { activeChat, sourcesMessageId } = useChatContext()
   const [transcriptChunkId, setTranscriptChunkId] = useState<string | null>(null)
 
   if (!activeChat || sourcesMessageId == null) {
@@ -26,13 +26,6 @@ export function SourcesPanel() {
                 : 'No sources for this message'}
             </div>
           </div>
-          <button
-            type="button"
-            className="sources-hide-button"
-            onClick={() => setSourcesTarget(null)}
-          >
-            Hide sources
-          </button>
         </header>
         <div className="sources-body">
           {sources.length === 0 ? (

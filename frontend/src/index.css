@@ -102,8 +102,37 @@ button {
   gap: 2px;
 }
 
-.chat-list-item {
+.chat-list-item-wrapper {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
   border-radius: 8px;
+  border-left: 2px solid transparent;
+  transition: background 0.15s, color 0.15s;
+}
+
+.chat-list-item-wrapper:hover {
+  background: #f0ede8;
+}
+
+.chat-list-item-wrapper:hover .chat-list-item {
+  color: #2d2a26;
+}
+
+.chat-list-item-wrapper.active {
+  background: #f0ede8;
+  border-left-color: #8b7355;
+}
+
+.chat-list-item-wrapper.active .chat-list-item {
+  color: #2d2a26;
+  padding-left: 10px;
+}
+
+.chat-list-item {
+  flex: 1;
+  min-width: 0;
+  border-radius: 6px;
   padding: 10px 12px;
   font-size: 13px;
   color: #6b6560;
@@ -118,15 +147,29 @@ button {
 }
 
 .chat-list-item:hover {
-  background: #f0ede8;
-  color: #2d2a26;
+  background: transparent;
 }
 
-.chat-list-item.active {
-  background: #f0ede8;
+.chat-list-item-delete {
+  width: 28px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #8a857e;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, background 0.15s;
+}
+
+.chat-list-item-delete:hover {
   color: #2d2a26;
-  border-left: 2px solid #8b7355;
-  padding-left: 10px;
+  background: #e8e4df;
 }
 
 .chat-list-title {
@@ -139,7 +182,7 @@ button {
   color: #8a857e;
 }
 
-.chat-list-item.active .chat-list-subtitle {
+.chat-list-item-wrapper.active .chat-list-subtitle {
   color: #6b6560;
 }
 
@@ -213,6 +256,98 @@ button {
   background: #f5f3ef;
   color: #2d2a26;
   border: 1px solid #e8e4df;
+}
+
+.message-content {
+  white-space: normal;
+  word-wrap: break-word;
+}
+
+.message-content p {
+  margin: 0 0 0.6em;
+}
+
+.message-content p:last-child {
+  margin-bottom: 0;
+}
+
+.message-content ul,
+.message-content ol {
+  margin: 0 0 0.6em;
+  padding-left: 1.4em;
+}
+
+.message-content li {
+  margin-bottom: 0.25em;
+}
+
+.message-content strong {
+  font-weight: 600;
+}
+
+.message-content em {
+  font-style: italic;
+}
+
+.message-content code {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+  padding: 0.15em 0.35em;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message-bubble.assistant .message-content code {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.message-content pre {
+  margin: 0.6em 0;
+  padding: 12px 14px;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.message-bubble.assistant .message-content pre {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.message-content pre code {
+  padding: 0;
+  background: none;
+}
+
+.message-content blockquote {
+  margin: 0.6em 0;
+  padding-left: 1em;
+  border-left: 3px solid #d4cfc8;
+  color: #4a4642;
+}
+
+.message-content h1,
+.message-content h2,
+.message-content h3 {
+  margin: 1em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.message-content h1 { font-size: 1.25em; }
+.message-content h2 { font-size: 1.1em; }
+.message-content h3 { font-size: 1em; }
+
+.message-content a {
+  color: #6b5b4f;
+  text-decoration: underline;
+}
+
+.message-content a:hover {
+  color: #4a4038;
 }
 
 .message-meta {
@@ -346,23 +481,6 @@ button {
   gap: 12px;
 }
 
-.sources-hide-button {
-  flex-shrink: 0;
-  padding: 6px 12px;
-  font-size: 12px;
-  color: #6b6560;
-  background: transparent;
-  border: 1px solid #e8e4df;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
-}
-
-.sources-hide-button:hover {
-  color: #2d2a26;
-  border-color: #d4cfc8;
-}
-
 .sources-title {
   font-size: 13px;
   font-weight: 600;
@@ -445,9 +563,11 @@ button {
 }
 
 .source-content .source-cited {
-  background: rgba(180, 200, 140, 0.35);
-  border-radius: 2px;
-  padding: 0 1px;
+  background: rgba(139, 115, 85, 0.35);
+  border-radius: 3px;
+  padding: 1px 3px;
+  font-weight: 500;
+  box-shadow: 0 0 0 1px rgba(139, 115, 85, 0.2);
 }
 
 .source-meta {

@@ -4,7 +4,7 @@ import { MessageBubble } from './MessageBubble'
 import { ChatInput } from './ChatInput'
 
 export function ChatView() {
-  const { activeChat, sendingChatId, setSourcesTarget } = useChatContext()
+  const { activeChat, sendingChatId, sourcesMessageId, setSourcesTarget } = useChatContext()
   const isActiveChatSending =
     activeChat != null && sendingChatId === activeChat.id
   const listRef = useRef<HTMLDivElement | null>(null)
@@ -53,11 +53,12 @@ export function ChatView() {
           <MessageBubble
             key={m.id}
             message={m}
-            onViewSources={
+            onToggleSources={
               m.role === 'assistant' && m.sources && m.sources.length > 0
-                ? () => setSourcesTarget(m.id)
+                ? () => setSourcesTarget(sourcesMessageId === m.id ? null : m.id)
                 : undefined
             }
+            isSourcesShown={sourcesMessageId === m.id}
           />
         ))}
         {activeChat.messages.length === 0 && (

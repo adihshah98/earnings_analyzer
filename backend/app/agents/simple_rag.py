@@ -7,6 +7,7 @@ Entity (company) and date are resolved via a cheap LLM call returning a list of
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -127,11 +128,13 @@ User query: {query}"""
             },
             {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
         ]
+        t0 = time.perf_counter()
         response = await client.responses.create(
             model=_RESOLUTION_MODEL,
             input=input_messages,
             max_output_tokens=_RESOLUTION_MAX_TOKENS,
         )
+        logger.info("[latency] _resolve_entities_via_llm: %.3fs", time.perf_counter() - t0)
         raw = (
             response.output_text
             if hasattr(response, "output_text")
@@ -211,7 +214,9 @@ async def resolve_company_and_date(
             (ticker, _date_expression_to_iso(date_expr, today_iso) or today_iso)
             for ticker, date_expr in entities
         ]
+        t0 = time.perf_counter()
         resolved_pairs = await resolve_entities_to_call_dates(entity_dates)
+        logger.info("[latency] resolve_entities_to_call_dates: %.3fs", time.perf_counter() - t0)
         if not resolved_pairs:
             logger.warning("Multi-entity: no call dates found for entities %s, using no filter", entity_dates)
         else:

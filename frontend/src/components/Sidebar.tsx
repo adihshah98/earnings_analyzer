@@ -1,7 +1,8 @@
 import { useChatContext } from '../context/ChatContext'
 
 export function Sidebar() {
-  const { chats, activeChatId, createNewChat, setActiveChat } = useChatContext()
+  const { chats, activeChatId, createNewChat, setActiveChat, deleteChat } =
+    useChatContext()
 
   return (
     <aside className="sidebar">
@@ -21,20 +22,36 @@ export function Sidebar() {
           </div>
         ) : (
           chats.map((chat) => (
-            <button
+            <div
               key={chat.id}
-              type="button"
               className={
-                'chat-list-item' +
+                'chat-list-item-wrapper' +
                 (chat.id === activeChatId ? ' active' : '')
               }
-              onClick={() => setActiveChat(chat.id)}
             >
-              <div className="chat-list-title">{chat.title || 'Untitled chat'}</div>
-              <div className="chat-list-subtitle">
-                {chat.messages.length} message{chat.messages.length === 1 ? '' : 's'}
-              </div>
-            </button>
+              <button
+                type="button"
+                className="chat-list-item"
+                onClick={() => setActiveChat(chat.id)}
+              >
+                <div className="chat-list-title">{chat.title || 'Untitled chat'}</div>
+                <div className="chat-list-subtitle">
+                  {chat.messages.length} message{chat.messages.length === 1 ? '' : 's'}
+                </div>
+              </button>
+              <button
+                type="button"
+                className="chat-list-item-delete"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  deleteChat(chat.id)
+                }}
+                title="Delete chat"
+                aria-label="Delete chat"
+              >
+                ×
+              </button>
+            </div>
           ))
         )}
       </div>

@@ -1,12 +1,14 @@
 """pgvector retrieval for RAG pipeline via SQLAlchemy + asyncpg."""
 
+import asyncio
 import logging
 import re
+import time
 from uuid import UUID
 
 from typing import Any, Literal
 
-from sqlalchemy import and_, desc, func, or_, select
+from sqlalchemy import and_, desc, func, or_, select, text
 
 from app.config import get_settings
 from app.evals.context import use_eval_chunks
@@ -133,10 +135,10 @@ async def _resolve_as_of_date(
     return resolved
 
 
-async def resolve_entities_to_call_dates(
+async def _resolve_entity_dates_batch(
     entity_dates: list[tuple[str, str]],
 ) -> list[tuple[str, str]]:
-    """Resolve (ticker, as_of_date_iso) to (ticker, call_date) for each entity.
+    """Resolve all (ticker, as_of_date_iso) pairs in a single DB query.
 
     Uses the latest call on or before as_of_date per company. Returns only pairs
     that have a matching call in the DB.
@@ -147,12 +149,63 @@ async def resolve_entities_to_call_dates(
     Returns:
         List of (company_ticker, call_date) pairs.
     """
-    pairs: list[tuple[str, str]] = []
-    for ticker, as_of_date in entity_dates:
-        resolved = await _resolve_as_of_date(as_of_date, company_ticker=ticker)
-        if resolved:
-            pairs.append(resolved[0])
+    if not entity_dates:
+        return []
+
+    Chunk = _get_chunk_model()
+    table_name = Chunk.__table__.name
+
+    tickers = [ticker for ticker, _ in entity_dates]
+    as_of_dates = [as_of for _, as_of in entity_dates]
+
+    t0 = time.perf_counter()
+    # Single query: unnest + LATERAL to resolve all pairs (column is "metadata" in DB)
+    stmt = text(f"""
+        WITH inputs(ticker, as_of_date) AS (
+            SELECT * FROM unnest(:tickers::text[], :as_of_dates::text[]) AS t(ticker, as_of_date)
+        )
+        SELECT i.ticker, l.call_date
+        FROM inputs i,
+        LATERAL (
+            SELECT MAX((c.metadata->>'call_date')) AS call_date
+            FROM {table_name} c
+            WHERE c.metadata->>'company_ticker' = i.ticker
+              AND c.metadata->>'call_date' <= i.as_of_date
+              AND c.metadata->>'call_date' IS NOT NULL
+        ) l
+        WHERE l.call_date IS NOT NULL
+    """)
+
+    async with get_session() as session:
+        result = await session.execute(
+            stmt, {"tickers": tickers, "as_of_dates": as_of_dates}
+        )
+        rows = result.mappings().all()
+
+    pairs = [(row["ticker"], row["call_date"]) for row in rows]
+    logger.info(
+        "[latency] _resolve_entity_dates_batch: %.3fs (%d entities → %d pairs)",
+        time.perf_counter() - t0,
+        len(entity_dates),
+        len(pairs),
+    )
     return pairs
+
+
+async def resolve_entities_to_call_dates(
+    entity_dates: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Resolve (ticker, as_of_date_iso) to (ticker, call_date) for each entity.
+
+    Uses a single batched query for all pairs to minimize DB round-trips.
+
+    Args:
+        entity_dates: List of (company_ticker, as_of_date_iso).
+
+    Returns:
+        List of (company_ticker, call_date) pairs.
+    """
+    return await _resolve_entity_dates_batch(entity_dates)
 
 
 async def _build_resolved_filters(
@@ -217,7 +270,9 @@ async def _retrieve_vector(
 ) -> list[dict[str, Any]]:
     """Retrieve chunks using vector (cosine similarity) search."""
     Chunk = _get_chunk_model()
+    t0 = time.perf_counter()
     query_embedding = await generate_embedding(search_query)
+    logger.info("[latency] generate_embedding: %.3fs", time.perf_counter() - t0)
     cosine_dist = Chunk.embedding.cosine_distance(query_embedding)
     similarity = 1 - cosine_dist
 
@@ -235,9 +290,11 @@ async def _retrieve_vector(
     )
     stmt = _apply_metadata_filters(stmt, filter_metadata, Chunk)
 
+    t0 = time.perf_counter()
     async with get_session() as session:
         result = await session.execute(stmt)
         rows = result.mappings().all()
+    logger.info("[latency] _retrieve_vector DB: %.3fs", time.perf_counter() - t0)
 
     return [
         {
@@ -284,6 +341,7 @@ async def _retrieve_keyword(
     )
     stmt = _apply_metadata_filters(stmt, filter_metadata, Chunk)
 
+    t0 = time.perf_counter()
     async with get_session() as session:
         try:
             result = await session.execute(stmt)
@@ -330,6 +388,7 @@ async def _retrieve_keyword(
                 raise
 
         rows = result.mappings().all()
+    logger.info("[latency] _retrieve_keyword DB: %.3fs", time.perf_counter() - t0)
 
     # Normalize ts_rank to [0,1] for display (ts_rank can be >1)
     max_rank = max((r["similarity"] or 0) for r in rows) if rows else 1.0
@@ -376,7 +435,9 @@ async def retrieve_relevant_chunks(
     threshold = threshold if threshold is not None else settings.retrieval_threshold
 
     # Resolve as_of_date (if present) into concrete call_date filters.
+    t0 = time.perf_counter()
     filter_metadata = await _build_resolved_filters(filter_metadata)
+    logger.info("[latency] _build_resolved_filters: %.3fs", time.perf_counter() - t0)
 
     try:
         if search_mode == "vector":
@@ -394,16 +455,19 @@ async def retrieve_relevant_chunks(
             )
         elif search_mode == "hybrid":
             # Same params as vector for fair comparison (threshold, top_k per source)
-            vector_chunks = await _retrieve_vector(
-                search_query=search_query,
-                top_k=top_k,
-                threshold=threshold,
-                filter_metadata=filter_metadata,
-            )
-            keyword_chunks = await _retrieve_keyword(
-                query=query,
-                top_k=top_k,
-                filter_metadata=filter_metadata,
+            # Run vector and keyword retrieval in parallel to reduce latency
+            vector_chunks, keyword_chunks = await asyncio.gather(
+                _retrieve_vector(
+                    search_query=search_query,
+                    top_k=top_k,
+                    threshold=threshold,
+                    filter_metadata=filter_metadata,
+                ),
+                _retrieve_keyword(
+                    query=query,
+                    top_k=top_k,
+                    filter_metadata=filter_metadata,
+                ),
             )
 
             vec_list = [(str(c["id"]), c["similarity"]) for c in vector_chunks]

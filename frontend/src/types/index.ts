@@ -37,6 +37,15 @@ export interface HistoryEntry {
   created_at?: string | null
 }
 
+/** Backend conversation session list item */
+export interface ConversationSessionSummary {
+  session_id: string
+  updated_at: string | null
+}
+
+/** Backend conversation history entry (same shape as HistoryEntry) */
+export type ConversationHistoryEntry = HistoryEntry
+
 export type Role = 'user' | 'assistant'
 
 export interface ChatMessage {

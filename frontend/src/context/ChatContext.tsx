@@ -6,7 +6,12 @@ import {
   useMemo,
   useReducer,
 } from 'react'
-import { queryAgentStream } from '../api/client'
+import {
+  deleteConversation,
+  getConversationHistory,
+  getConversationSessions,
+  queryAgentStream,
+} from '../api/client'
 import type { AgentResponse, ChatMessage, ChatSession } from '../types'
 import { createSessionId, loadFromStorage, saveToStorage, truncateTitle } from '../utils/helpers'
 
@@ -22,8 +27,14 @@ type ChatState = {
 
 type ChatAction =
   | { type: 'INIT_FROM_STORAGE'; payload: { chats: ChatSession[]; activeChatId: string | null } }
+  | { type: 'INIT_FROM_BACKEND'; payload: { chats: ChatSession[]; activeChatId: string | null } }
   | { type: 'CREATE_CHAT'; payload: { chat: ChatSession } }
   | { type: 'SET_ACTIVE_CHAT'; payload: { chatId: string } }
+  | {
+      type: 'SET_CHAT_MESSAGES'
+      payload: { chatId: string; messages: ChatMessage[]; title?: string }
+    }
+  | { type: 'DELETE_CHAT'; payload: { chatId: string } }
   | { type: 'SET_ERROR'; payload: { error: string | null } }
   | { type: 'SET_DRAFT'; payload: { chatId: string; value: string } }
   | { type: 'SEND_START'; payload: { chatId: string } }
@@ -79,6 +90,45 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
         activeChatId: action.payload.activeChatId,
       }
     }
+    case 'INIT_FROM_BACKEND': {
+      return {
+        ...state,
+        chats: action.payload.chats,
+        activeChatId: action.payload.activeChatId,
+      }
+    }
+    case 'SET_CHAT_MESSAGES': {
+      const { chatId, messages, title } = action.payload
+      return {
+        ...state,
+        chats: state.chats.map((chat) =>
+          chat.id === chatId
+            ? {
+                ...chat,
+                messages,
+                ...(title !== undefined ? { title } : {}),
+              }
+            : chat,
+        ),
+      }
+    }
+    case 'DELETE_CHAT': {
+      const { chatId } = action.payload
+      const nextChats = state.chats.filter((c) => c.id !== chatId)
+      const nextActive =
+        state.activeChatId === chatId
+          ? nextChats[0]?.id ?? null
+          : state.activeChatId
+      return {
+        ...state,
+        chats: nextChats,
+        activeChatId: nextActive,
+        drafts: (() => {
+          const { [chatId]: _, ...rest } = state.drafts
+          return rest
+        })(),
+      }
+    }
     case 'CREATE_CHAT': {
       return {
         ...state,
@@ -114,6 +164,7 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...state,
         sendingChatId: action.payload.chatId,
         error: null,
+        sourcesMessageId: null,
       }
     }
     case 'ADD_STREAMING_MESSAGES': {
@@ -243,6 +294,7 @@ type ChatContextValue = {
   setDraft: (chatId: string, value: string) => void
   sendMessage: (content: string) => Promise<void>
   setSourcesTarget: (messageId: string | null) => void
+  deleteChat: (chatId: string) => Promise<void>
 }
 
 const ChatContext = createContext<ChatContextValue | undefined>(undefined)
@@ -263,21 +315,78 @@ function persistState(state: ChatState): void {
 export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(chatReducer, initialState)
 
-  // Load from localStorage on first mount
+  // Load from backend on first mount; fall back to localStorage on failure
   useEffect(() => {
-    const stored = loadFromStorage<StoredState>()
-    if (stored) {
-      dispatch({
-        type: 'INIT_FROM_STORAGE',
-        payload: {
-          chats: stored.chats ?? [],
-          activeChatId: stored.activeChatId ?? null,
-        },
+    let cancelled = false
+    getConversationSessions()
+      .then((sessions) => {
+        if (cancelled) return
+        const chats: ChatSession[] = sessions.map((s) => ({
+          id: s.session_id,
+          title: 'Chat',
+          messages: [],
+        }))
+        const stored = loadFromStorage<StoredState>()
+        const activeChatId =
+          stored?.activeChatId && chats.some((c) => c.id === stored.activeChatId)
+            ? stored.activeChatId
+            : chats[0]?.id ?? null
+        dispatch({
+          type: 'INIT_FROM_BACKEND',
+          payload: { chats, activeChatId },
+        })
       })
+      .catch(() => {
+        if (cancelled) return
+        const stored = loadFromStorage<StoredState>()
+        if (stored) {
+          dispatch({
+            type: 'INIT_FROM_STORAGE',
+            payload: {
+              chats: stored.chats ?? [],
+              activeChatId: stored.activeChatId ?? null,
+            },
+          })
+        }
+      })
+    return () => {
+      cancelled = true
     }
   }, [])
 
-  // Persist on change
+  // When active chat has no messages, load history from backend
+  useEffect(() => {
+    const chatId = state.activeChatId
+    const chat = chatId ? state.chats.find((c) => c.id === chatId) : null
+    if (!chatId || !chat || chat.messages.length > 0) return
+    let cancelled = false
+    getConversationHistory(chatId)
+      .then((entries) => {
+        if (cancelled) return
+        const messages: ChatMessage[] = entries.map((e) => ({
+          id: createSessionId(),
+          role: e.role as 'user' | 'assistant',
+          content: e.content,
+          createdAt: e.created_at ?? new Date().toISOString(),
+        }))
+        const firstUser = entries.find((e) => e.role === 'user')
+        const title = firstUser?.content
+          ? truncateTitle(firstUser.content)
+          : undefined
+        dispatch({
+          type: 'SET_CHAT_MESSAGES',
+          payload: { chatId, messages, title },
+        })
+      })
+      .catch(() => {
+        // ignore: leave messages empty
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [state.activeChatId, state.chats])
+
+  // Persist on change (cache for offline / fallback)
   useEffect(() => {
     persistState(state)
   }, [state])
@@ -378,6 +487,21 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'SET_DRAFT', payload: { chatId, value } })
   }, [])
 
+  const deleteChat = useCallback(async (chatId: string) => {
+    try {
+      await deleteConversation(chatId)
+      dispatch({ type: 'DELETE_CHAT', payload: { chatId } })
+    } catch (err) {
+      dispatch({
+        type: 'SET_ERROR',
+        payload: {
+          error:
+            err instanceof Error ? err.message : 'Failed to delete conversation',
+        },
+      })
+    }
+  }, [])
+
   const activeChat = useMemo(
     () => state.chats.find((c) => c.id === state.activeChatId) ?? null,
     [state.chats, state.activeChatId],
@@ -398,6 +522,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     setDraft,
     sendMessage,
     setSourcesTarget,
+    deleteChat,
   }
 
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>
