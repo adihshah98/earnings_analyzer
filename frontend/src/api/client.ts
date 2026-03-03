@@ -4,6 +4,8 @@ import type {
   TranscriptResponse,
 } from '../types'
 
+const API_BASE = import.meta.env.VITE_API_URL || ''
+
 const JSON_HEADERS: HeadersInit = {
   'Content-Type': 'application/json',
 }
@@ -17,7 +19,7 @@ async function handleResponse<T>(res: Response): Promise<T> {
 }
 
 export async function queryAgent(body: QueryRequest): Promise<AgentResponse> {
-  const res = await fetch('/agent/query', {
+  const res = await fetch(`${API_BASE}/agent/query`, {
     method: 'POST',
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
@@ -29,7 +31,7 @@ export async function getTranscriptByChunkId(
   chunkId: string,
 ): Promise<TranscriptResponse> {
   const res = await fetch(
-    `/rag/chunks/${encodeURIComponent(chunkId)}/transcript`,
+    `${API_BASE}/rag/chunks/${encodeURIComponent(chunkId)}/transcript`,
     { method: 'GET' },
   )
   return handleResponse<TranscriptResponse>(res)
