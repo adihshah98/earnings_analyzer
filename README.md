@@ -160,7 +160,7 @@ cd backend && python scripts/run_retrieval_evals.py [dataset]
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/agent/query` | Query the KB agent |
+| POST | `/agent/query` | Query the KB agent (SSE stream: deltas + final payload) |
 | GET | `/conversations/{session_id}/history` | Get conversation history for a session |
 | POST | `/rag/ingest` | Ingest documents |
 | POST | `/rag/search` | Direct semantic search (supports search_mode: vector, keyword, hybrid) |

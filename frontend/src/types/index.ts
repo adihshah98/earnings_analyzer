@@ -6,6 +6,7 @@ export interface QueryRequest {
   company_ticker?: string | null
   search_mode?: SearchModeType | null
   retrieval_threshold?: number | null
+  as_of_date?: string | null
 }
 
 export interface CitedSpan {

@@ -6,7 +6,7 @@ import {
   useMemo,
   useReducer,
 } from 'react'
-import { queryAgent } from '../api/client'
+import { queryAgentStream } from '../api/client'
 import type { AgentResponse, ChatMessage, ChatSession } from '../types'
 import { createSessionId, loadFromStorage, saveToStorage, truncateTitle } from '../utils/helpers'
 
@@ -14,6 +14,7 @@ type ChatState = {
   chats: ChatSession[]
   activeChatId: string | null
   sendingChatId: string | null
+  streamingAssistantId: string | null
   drafts: Record<string, string>
   error: string | null
   sourcesMessageId: string | null
@@ -27,6 +28,19 @@ type ChatAction =
   | { type: 'SET_DRAFT'; payload: { chatId: string; value: string } }
   | { type: 'SEND_START'; payload: { chatId: string } }
   | {
+      type: 'ADD_STREAMING_MESSAGES'
+      payload: {
+        chatId: string
+        userMessage: ChatMessage
+        assistantMessage: ChatMessage
+      }
+    }
+  | { type: 'STREAM_DELTA'; payload: { chatId: string; text: string } }
+  | {
+      type: 'SEND_SUCCESS_STREAM'
+      payload: { chatId: string; messageId: string; payload: AgentResponse }
+    }
+  | {
       type: 'SEND_SUCCESS'
       payload: {
         chatId: string
@@ -36,7 +50,13 @@ type ChatAction =
     }
   | {
       type: 'SEND_ERROR'
-      payload: { chatId: string; userMessageId: string; error: string }
+      payload: {
+        chatId: string
+        userMessageId: string
+        error: string
+        /** When streaming, remove this assistant message (placeholder) on error */
+        assistantMessageId?: string
+      }
     }
   | { type: 'SET_SOURCES_TARGET'; payload: { messageId: string | null } }
 
@@ -44,6 +64,7 @@ const initialState: ChatState = {
   chats: [],
   activeChatId: null,
   sendingChatId: null,
+  streamingAssistantId: null,
   drafts: {},
   error: null,
   sourcesMessageId: null,
@@ -95,6 +116,70 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
         error: null,
       }
     }
+    case 'ADD_STREAMING_MESSAGES': {
+      const { chatId, userMessage, assistantMessage } = action.payload
+      return {
+        ...state,
+        sendingChatId: chatId,
+        streamingAssistantId: assistantMessage.id,
+        chats: state.chats.map((chat) =>
+          chat.id === chatId
+            ? {
+                ...chat,
+                title:
+                  chat.messages.length === 0 && userMessage.content
+                    ? truncateTitle(userMessage.content)
+                    : chat.title,
+                messages: [...chat.messages, userMessage, assistantMessage],
+              }
+            : chat,
+        ),
+      }
+    }
+    case 'STREAM_DELTA': {
+      const { chatId, text } = action.payload
+      return {
+        ...state,
+        chats: state.chats.map((chat) =>
+          chat.id === chatId && state.streamingAssistantId
+            ? {
+                ...chat,
+                messages: chat.messages.map((msg) =>
+                  msg.id === state.streamingAssistantId
+                    ? { ...msg, content: msg.content + text }
+                    : msg,
+                ),
+              }
+            : chat,
+        ),
+      }
+    }
+    case 'SEND_SUCCESS_STREAM': {
+      const { chatId, messageId, payload: res } = action.payload
+      return {
+        ...state,
+        sendingChatId: null,
+        streamingAssistantId: null,
+        drafts: { ...state.drafts, [chatId]: '' },
+        chats: state.chats.map((chat) =>
+          chat.id === chatId
+            ? {
+                ...chat,
+                messages: chat.messages.map((msg) =>
+                  msg.id === messageId
+                    ? {
+                        ...msg,
+                        content: res.answer,
+                        sources: res.sources,
+                        confidence: res.confidence,
+                      }
+                    : msg,
+                ),
+              }
+            : chat,
+        ),
+      }
+    }
     case 'SEND_SUCCESS': {
       const { chatId, userMessage, assistantMessage } = action.payload
       const nextDrafts = { ...state.drafts, [chatId]: '' }
@@ -117,16 +202,18 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }
     }
     case 'SEND_ERROR': {
-      const { chatId, userMessageId, error } = action.payload
+      const { chatId, userMessageId, error, assistantMessageId } = action.payload
+      const idToRemove = assistantMessageId ?? userMessageId
       return {
         ...state,
         sendingChatId: null,
+        streamingAssistantId: null,
         error,
         chats: state.chats.map((chat) =>
           chat.id === chatId
             ? {
                 ...chat,
-                messages: chat.messages.filter((m) => m.id !== userMessageId),
+                messages: chat.messages.filter((m) => m.id !== idToRemove),
               }
             : chat,
         ),
@@ -234,29 +321,38 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
       dispatch({ type: 'SEND_START', payload: { chatId } })
 
+      const assistantMessage: ChatMessage = {
+        id: createSessionId(),
+        role: 'assistant',
+        content: '',
+        createdAt: new Date().toISOString(),
+      }
+      dispatch({
+        type: 'ADD_STREAMING_MESSAGES',
+        payload: { chatId, userMessage, assistantMessage },
+      })
+
       try {
-        const response: AgentResponse = await queryAgent({
+        for await (const event of queryAgentStream({
           query: trimmed,
           session_id: chatId,
-        })
-
-        const assistantMessage: ChatMessage = {
-          id: createSessionId(),
-          role: 'assistant',
-          content: response.answer,
-          createdAt: new Date().toISOString(),
-          sources: response.sources,
-          confidence: response.confidence,
+        })) {
+          if (event.type === 'delta') {
+            dispatch({
+              type: 'STREAM_DELTA',
+              payload: { chatId, text: event.text },
+            })
+          } else if (event.type === 'done') {
+            dispatch({
+              type: 'SEND_SUCCESS_STREAM',
+              payload: {
+                chatId,
+                messageId: assistantMessage.id,
+                payload: event.payload,
+              },
+            })
+          }
         }
-
-        dispatch({
-          type: 'SEND_SUCCESS',
-          payload: {
-            chatId,
-            userMessage,
-            assistantMessage,
-          },
-        })
       } catch (err) {
         const errorMessage =
           err instanceof Error ? err.message : 'Something went wrong while sending your message.'
@@ -266,6 +362,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             chatId,
             userMessageId: userMessage.id,
             error: errorMessage,
+            assistantMessageId: assistantMessage.id,
           },
         })
       }

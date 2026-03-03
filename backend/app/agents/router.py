@@ -1,42 +1,59 @@
 """Agent API routes."""
 
+import json
 import logging
 
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 
-from app.agents.kb_agent import query_agent
 from app.config import get_settings
-from app.models.schemas import AgentResponse, QueryRequest
+from app.models.schemas import QueryRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 
-@router.post("/query", response_model=AgentResponse)
-async def agent_query(request: QueryRequest):
-    """Query the knowledge base agent.
-
-    Only ``query`` is required in the request body.  All other fields
-    fall back to application-level defaults defined in ``Settings``.
-    """
+def _get_request_params(request: QueryRequest):
     settings = get_settings()
+    return {
+        "session_id": request.session_id,
+        "company_ticker": request.company_ticker or settings.default_company_ticker,
+        "search_mode": request.search_mode or settings.default_search_mode,
+        "retrieval_threshold": (
+            request.retrieval_threshold
+            if request.retrieval_threshold is not None
+            else settings.retrieval_threshold
+        ),
+    }
 
-    session_id = request.session_id
-    company_ticker = request.company_ticker or settings.default_company_ticker
-    search_mode = request.search_mode or settings.default_search_mode
-    retrieval_threshold = (
-        request.retrieval_threshold
-        if request.retrieval_threshold is not None
-        else settings.retrieval_threshold
+
+@router.post("/query")
+async def agent_query(request: QueryRequest):
+    """Query the knowledge base agent. Returns SSE stream: delta events then a final 'done' event with answer, sources, confidence."""
+    params = _get_request_params(request)
+
+    async def event_stream():
+        from app.agents.streaming import stream_simple_rag_or_agent
+
+        async for event_type, payload in stream_simple_rag_or_agent(
+            query=request.query,
+            session_id=params["session_id"],
+            request_company_ticker=params["company_ticker"],
+            request_as_of_date=request.as_of_date,
+            search_mode=params["search_mode"],
+            retrieval_threshold=params["retrieval_threshold"],
+        ):
+            if event_type == "delta":
+                yield f"data: {json.dumps({'type': 'delta', 'text': payload})}\n\n"
+            elif event_type == "done":
+                yield f"data: {json.dumps({'type': 'done', 'payload': payload})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
-
-    filter_metadata = {"company_ticker": company_ticker} if company_ticker else None
-
-    response = await query_agent(
-        query=request.query,
-        session_id=session_id,
-        search_mode=search_mode,
-        retrieval_threshold=retrieval_threshold,
-        filter_metadata=filter_metadata,
-    )
-    return response

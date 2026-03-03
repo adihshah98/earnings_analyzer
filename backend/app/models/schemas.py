@@ -38,6 +38,10 @@ class QueryRequest(BaseModel):
         le=1.0,
         description="Min similarity for vector search (0–1). Falls back to RETRIEVAL_THRESHOLD in config.",
     )
+    as_of_date: str | None = Field(
+        default=None,
+        description="Scope to a specific date (ISO YYYY-MM-DD) or quarter. Used by simple RAG path.",
+    )
 
 
 class CitedSpan(BaseModel):

@@ -6,11 +6,17 @@ from typing import Any
 
 from pydantic_ai import Agent, UsageLimits
 
+import asyncio
+
 from app.config import get_settings
-from app.conversations.service import append_conversation_messages, get_conversation_history
+from app.conversations.service import (
+    append_conversation_messages,
+    get_conversation_history,
+    get_recent_user_queries,
+)
 from app.models.schemas import AgentResponse, Citation, CitedSpan, SourceDocument
 from app.prompts.templates import SYSTEM_PROMPT_V1
-from app.rag.retriever import get_known_companies
+from app.rag.retriever import get_known_companies, retrieve_relevant_chunks
 from app.tools.agent_tools import (
     AgentDeps,
     calculate,

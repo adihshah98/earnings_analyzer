@@ -63,6 +63,43 @@ def chunk_text(
     return chunks
 
 
+def _is_standalone_speaker_header(line: str) -> str | None:
+    """If line looks like 'Name Company – Role' (no colon, has en/em dash), return it; else None.
+
+    Used for transcripts where the speaker is on its own line, e.g.:
+    "Darren Yip ServiceNow, Inc. – Head of Investor Relations"
+    """
+    stripped = line.strip()
+    if not stripped or ":" in stripped or len(stripped) > 120:
+        return None
+    if re.search(r"\s+[–—]\s+", stripped):
+        return stripped
+    return None
+
+
+def _split_line_on_mid_speaker(line: str) -> tuple[str, str, str] | None:
+    """If line contains a speaker header after a sentence (e.g. '. Name Co – Role '), return (before, header, after); else None.
+
+    Handles cases where the source has no newline before the speaker, e.g.:
+    "...for our use cases as well. William R. McDermott ServiceNow, Inc. – Chairman & CEO And may I just..."
+    Splits at the dash: header is "Name Company – Role"; role ends at a sentence boundary (space + capital + optional lowercase + space), not hardcoded words.
+    """
+    if " – " not in line and " — " not in line:
+        return None
+    # After a period and space, capture "Name ... Company – Role"; role ends when we see \s+ then a word (Capital + optional lowercase) + space (start of next sentence).
+    m = re.match(
+        r"(.*?[.])\s+([A-Z][^–—]*?\s+[–—]\s+[A-Za-z\s&\-]+?)(?=\s+[A-Z][a-z]*\s)\s+([A-Z].*)",
+        line,
+        re.DOTALL,
+    )
+    if not m:
+        return None
+    before, header, after = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+    if len(header) > 120:
+        return None
+    return (before, header, after)
+
+
 def _parse_speaker_turn(line: str) -> tuple[str, str | None, str] | None:
     """Parse a line as 'Speaker [Role]: [content]'. Returns (speaker, role, content) or None.
 
@@ -94,7 +131,11 @@ def chunk_transcript(
 ) -> list[dict[str, Any]]:
     """Split transcript into chunks by speaker turns, preserving speaker metadata.
 
-    Splits on speaker header lines (e.g. "Tim Cook -- CEO:" or "Operator:").
+    Recognizes two formats:
+    - Colon style: "Name – Role: content" or "Name: content" on one line.
+    - Standalone header: "Name Company – Role" on its own line, content on following lines.
+
+    Stored chunk content is formatted as "Speaker Line\\n\\nContent" for retrieval.
     Keeps each speaker block as a unit; only sub-chunks if a block exceeds chunk_size.
 
     Args:
@@ -135,8 +176,25 @@ def chunk_transcript(
             current_speaker = speaker
             current_role = role
             current_lines = [content] if content else []
-        elif stripped:
-            current_lines.append(line)
+        else:
+            standalone = _is_standalone_speaker_header(stripped)
+            if standalone is not None:
+                flush_block()
+                current_speaker = standalone
+                current_role = None
+                current_lines = []
+            else:
+                mid_split = _split_line_on_mid_speaker(line)
+                if mid_split is not None:
+                    before, header, after = mid_split
+                    if before:
+                        current_lines.append(before)
+                    flush_block()
+                    current_speaker = header
+                    current_role = None
+                    current_lines = [after] if after else []
+                elif stripped:
+                    current_lines.append(line)
 
     flush_block()
 
@@ -144,19 +202,36 @@ def chunk_transcript(
     if not blocks:
         return [{"content": text, "speaker": None, "speaker_role": None}]
 
-    # Sub-chunk blocks that exceed chunk_size
+    def _speaker_header(block: dict[str, Any]) -> str | None:
+        if block.get("speaker") is None:
+            return None
+        if block.get("speaker_role"):
+            return f"{block['speaker']} – {block['speaker_role']}"
+        return block["speaker"]
+
+    def _format_chunk_content(header: str | None, body: str) -> str:
+        if header:
+            return f"{header}\n\n{body}".strip()
+        return body
+
+    # Sub-chunk blocks that exceed chunk_size; format stored content as "Speaker Line\n\nContent"
     tokenizer = _get_tokenizer()
     final: list[dict[str, Any]] = []
     for block in blocks:
-        block_text = block["content"]
-        tokens = tokenizer.encode(block_text)
+        body = block["content"]
+        header = _speaker_header(block)
+        tokens = tokenizer.encode(body)
         if len(tokens) <= chunk_size:
-            final.append(block)
+            final.append({
+                "content": _format_chunk_content(header, body),
+                "speaker": block["speaker"],
+                "speaker_role": block["speaker_role"],
+            })
         else:
-            sub_chunks = chunk_text(block_text, chunk_size, chunk_overlap)
+            sub_chunks = chunk_text(body, chunk_size, chunk_overlap)
             for sc in sub_chunks:
                 final.append({
-                    "content": sc,
+                    "content": _format_chunk_content(header, sc),
                     "speaker": block["speaker"],
                     "speaker_role": block["speaker_role"],
                 })
