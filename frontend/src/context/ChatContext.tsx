@@ -7,7 +7,6 @@ import {
   useReducer,
 } from 'react'
 import { queryAgent } from '../api/client'
-import type AgentTypes from '../types'
 import type { AgentResponse, ChatMessage, ChatSession } from '../types'
 import { createSessionId, loadFromStorage, saveToStorage, truncateTitle } from '../utils/helpers'
 

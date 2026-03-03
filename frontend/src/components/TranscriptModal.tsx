@@ -52,12 +52,12 @@ export function TranscriptModal({ chunkId, onClose }: Props) {
           {data && (
             <div className="transcript-full-chunks">
               <div className="transcript-meta">
-                {data.metadata.company_ticker && (
+                {data.metadata.company_ticker != null ? (
                   <span>Company: {String(data.metadata.company_ticker)}</span>
-                )}
-                {data.metadata.call_date && (
+                ) : null}
+                {data.metadata.call_date != null ? (
                   <span>Call date: {String(data.metadata.call_date)}</span>
-                )}
+                ) : null}
                 {data.full_transcript ? (
                   <span>Full transcript</span>
                 ) : (
