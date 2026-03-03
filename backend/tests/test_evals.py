@@ -185,26 +185,3 @@ class TestRetrievalEvalResult:
         assert s.hit_at_k == 0.0
 
 
-class TestCalculatorTool:
-    """Test the calculator tool for correctness."""
-
-    @pytest.mark.asyncio
-    async def test_valid_expression(self):
-        from app.tools.agent_tools import AgentDeps, calculate
-
-        class MockCtx:
-            deps = AgentDeps()
-
-        result = await calculate(MockCtx(), "2 + 3")
-        assert result == "5"
-
-    @pytest.mark.asyncio
-    async def test_invalid_expression_should_error(self):
-        """Invalid expressions should return an error, not '0'."""
-        from app.tools.agent_tools import AgentDeps, calculate
-
-        class MockCtx:
-            deps = AgentDeps()
-
-        result = await calculate(MockCtx(), "hello + world")
-        assert result != "0", "Calculator should not silently return '0' for invalid input"

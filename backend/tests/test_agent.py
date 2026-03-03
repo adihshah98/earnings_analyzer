@@ -1,9 +1,8 @@
-"""Tests for the KB agent."""
+"""Tests for AgentResponse schema (used by simple RAG)."""
 
 import pytest
 
 from app.models.schemas import AgentResponse, SourceDocument
-from app.tools.agent_tools import AgentDeps
 
 
 class TestAgentResponse:
@@ -22,7 +21,7 @@ class TestAgentResponse:
                 )
             ],
             reasoning="Found direct answer in HR handbook.",
-            tool_calls_made=["search_knowledge_base"],
+            tool_calls_made=[],
         )
         assert response.answer
         assert response.confidence == 0.95
@@ -47,26 +46,3 @@ class TestAgentResponse:
             )
 
 
-class TestAgentDeps:
-    """Test agent dependency injection."""
-
-    def test_default_deps(self):
-        deps = AgentDeps()
-        assert deps.session_id is None
-        assert deps.user_name == "anonymous"
-        assert deps.user_role == "viewer"
-
-    def test_custom_deps(self):
-        deps = AgentDeps(
-            session_id="test-session-123",
-            user_name="Alice",
-            user_role="admin",
-            user_department="engineering",
-        )
-        assert deps.session_id == "test-session-123"
-        assert deps.user_name == "Alice"
-
-    def test_session_propagation(self):
-        """Test that session_id is properly stored."""
-        deps = AgentDeps(session_id="my-session")
-        assert deps.session_id == "my-session"

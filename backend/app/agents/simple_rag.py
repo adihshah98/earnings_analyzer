@@ -1,7 +1,7 @@
-"""Simple RAG path: single retrieval + one LLM call (no agentic tool loop).
+"""Simple RAG: single retrieval + one LLM call (no agentic tool loop).
 
 Entity (company) and date are resolved via a cheap LLM call returning a list of
-(entity, date) pairs; routing (simple vs agent path) is based on the number of entities.
+(entity, date) pairs. All queries use this path.
 """
 
 import json
@@ -12,7 +12,7 @@ from typing import Any
 
 from app.conversations.service import get_recent_user_queries
 from app.rag.embeddings import get_openai_client
-from app.rag.retriever import retrieve_relevant_chunks
+from app.rag.retriever import resolve_entities_to_call_dates, retrieve_relevant_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +27,25 @@ _RESOLUTION_MAX_TOKENS = 120
 ResolvedEntity = tuple[str, str | None]
 
 
+def _extract_text_from_responses_output(output: list) -> str:
+    """Extract text from Responses API output (fallback when output_text unavailable)."""
+    parts = []
+    for item in output or []:
+        if getattr(item, "type", None) == "message" and hasattr(item, "content"):
+            for c in item.content or []:
+                if getattr(c, "type", None) == "output_text":
+                    parts.append(getattr(c, "text", "") or "")
+    return "".join(parts)
+
+
 @dataclass
 class SimpleRAGScope:
-    """Resolved scope for the simple RAG path."""
+    """Resolved scope for retrieval and LLM."""
 
     company_ticker: str | None
     as_of_date: str | None
-    use_simple_path: bool
+    # For multi-entity: pre-resolved (ticker, call_date) pairs; enables single retrieval with OR filter.
+    resolved_date_pairs: list[tuple[str, str]] | None = None
 
 
 def _date_expression_to_iso(date_expression: str | None, today_iso: str) -> str | None:
@@ -106,17 +118,37 @@ Reply with only a JSON object: {{ "entities": [ {{ "company_ticker": "<ticker>",
 User query: {query}"""
     try:
         client = get_openai_client()
-        response = await client.chat.completions.create(
+        input_messages = [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "input_text", "text": "You output only valid JSON with key 'entities' (array of objects with company_ticker and date_expression)."},
+                ],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
+        ]
+        response = await client.responses.create(
             model=_RESOLUTION_MODEL,
-            messages=[
-                {"role": "system", "content": "You output only valid JSON with key 'entities' (array of objects with company_ticker and date_expression)."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=_RESOLUTION_MAX_TOKENS,
-            temperature=0,
-            response_format={"type": "json_object"},
+            input=input_messages,
+            max_output_tokens=_RESOLUTION_MAX_TOKENS,
         )
-        content = (response.choices[0].message.content or "").strip()
+        raw = (
+            response.output_text
+            if hasattr(response, "output_text")
+            else _extract_text_from_responses_output(getattr(response, "output", []))
+        )
+        content = (raw or "").strip()
+        if not content:
+            return []
+        # Strip markdown code blocks if present (e.g. ```json ... ```)
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.lstrip().lower().startswith("json"):
+                content = content.lstrip()[4:]
+            content = content.strip()
+        # Strip BOM if present
+        if content.startswith("\ufeff"):
+            content = content[1:]
         if not content:
             return []
         data = json.loads(content)
@@ -138,7 +170,12 @@ User query: {query}"""
             result.append((ticker, date_expr))
         return result
     except (json.JSONDecodeError, KeyError, IndexError, AttributeError) as e:
-        logger.warning("Entity resolution LLM parse failed: %s", e)
+        raw_content = (raw or "").strip()[:500]
+        logger.warning(
+            "Entity resolution LLM parse failed: %s (raw: %r)",
+            e,
+            raw_content,
+        )
         return []
     except Exception as e:
         logger.warning("Entity resolution LLM call failed: %s", e)
@@ -152,33 +189,37 @@ async def resolve_company_and_date(
     companies: list[dict[str, str]],
     today_iso: str,
 ) -> SimpleRAGScope:
-    """Resolve scope from LLM list of (entity, date) pairs; route by number of entities.
+    """Resolve scope from LLM list of (entity, date) pairs.
 
-    - If both request params are provided, use them (no LLM), use_simple_path=True.
-    - Else: call LLM to get a list of (company_ticker, date_expression) pairs.
-      - 2+ entities → use_simple_path=False (agent path).
-      - 1 entity → use that ticker and date for simple path.
-      - 0 entities → default (today, no company filter), use_simple_path=True.
+    - If both request params are provided, use them (no LLM).
+    - Else: call LLM to get (company_ticker, date_expression) pairs.
+    - Multi-entity: resolve to (ticker, call_date) pairs for OR filter; if none found, use no filter.
     """
     # Request params: when both provided, use them (e.g. UI sent them)
     if request_company_ticker and request_as_of_date:
         return SimpleRAGScope(
             company_ticker=request_company_ticker,
             as_of_date=request_as_of_date,
-            use_simple_path=True,
         )
 
-    # LLM returns list of (entity, date) pairs; routing by count
     entities: list[ResolvedEntity] = []
     if companies:
         entities = await _resolve_entities_via_llm(query, companies, today_iso)
 
     if len(entities) >= 2:
-        logger.info("Simple RAG: %d entities -> agent path", len(entities))
+        entity_dates = [
+            (ticker, _date_expression_to_iso(date_expr, today_iso) or today_iso)
+            for ticker, date_expr in entities
+        ]
+        resolved_pairs = await resolve_entities_to_call_dates(entity_dates)
+        if not resolved_pairs:
+            logger.warning("Multi-entity: no call dates found for entities %s, using no filter", entity_dates)
+        else:
+            logger.info("Simple RAG: %d entities -> multi-entity (single retrieval)", len(entities))
         return SimpleRAGScope(
             company_ticker=None,
             as_of_date=None,
-            use_simple_path=False,
+            resolved_date_pairs=resolved_pairs if resolved_pairs else None,
         )
 
     if len(entities) == 1:
@@ -193,22 +234,25 @@ async def resolve_company_and_date(
         return SimpleRAGScope(
             company_ticker=ticker,
             as_of_date=as_of_date,
-            use_simple_path=True,
         )
 
-    # 0 entities: default (today, no company filter)
     return SimpleRAGScope(
         company_ticker=request_company_ticker,
         as_of_date=request_as_of_date or today_iso,
-        use_simple_path=True,
     )
 
 
 def _format_context_for_prompt(chunks: list[dict[str, Any]]) -> str:
-    """Format retrieved chunks like search_knowledge_base does for the prompt."""
+    """Format retrieved chunks for the prompt; include company_ticker and call_date so the LLM knows which company/period each chunk is from."""
     parts = []
     for i, c in enumerate(chunks, 1):
-        source = (c.get("metadata") or {}).get("title", "Unknown")
+        meta = c.get("metadata") or {}
+        ticker = meta.get("company_ticker", "")
+        title = meta.get("title", "Unknown")
+        call_date = meta.get("call_date", "")
         sim = c.get("similarity", 0.0)
-        parts.append(f"[Source {i}: {source} (relevance: {sim:.2f})]\n{c.get('content', '')}")
+        # company_ticker comes from ingestion (required at upload); title may only have date
+        label_parts = [p for p in [ticker, title, call_date] if p]
+        source_label = " | ".join(label_parts) if label_parts else "Unknown"
+        parts.append(f"[Source {i}: {source_label} (relevance: {sim:.2f})]\n{c.get('content', '')}")
     return "\n\n---\n\n".join(parts) if parts else ""

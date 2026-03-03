@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic_evals.reporting import EvaluationReport
 
-from app.agents.kb_agent import query_agent
+from app.agents.streaming import run_simple_rag
 from app.evals.datasets import load_dataset
 from app.models.schemas import (
     AgentResponse,
@@ -23,8 +23,8 @@ async def _task(
     inputs: dict[str, str],
     search_mode: str | None = None,
 ) -> AgentResponse:
-    """Task function for PydanticEvals: runs query through the agent."""
-    return await query_agent(
+    """Task function for PydanticEvals: runs query through simple RAG (same as prod)."""
+    return await run_simple_rag(
         query=inputs["query"],
         search_mode=search_mode,
     )
@@ -146,7 +146,7 @@ async def run_eval(
 
     report = await dataset.evaluate(
         make_task(mode),
-        name=f"kb_agent_{run_id}",
+        name=f"simple_rag_{run_id}",
         max_concurrency=concurrency,
         progress=True,
     )

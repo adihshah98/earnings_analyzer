@@ -166,7 +166,7 @@ def chunk_transcript(
                     "speaker_role": current_role,
                 })
 
-    lines = text.split("\n")
+    lines = re.split(r"\n{2,}", text)
     for line in lines:
         stripped = line.strip()
         parsed = _parse_speaker_turn(stripped)

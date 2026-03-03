@@ -133,6 +133,28 @@ async def _resolve_as_of_date(
     return resolved
 
 
+async def resolve_entities_to_call_dates(
+    entity_dates: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Resolve (ticker, as_of_date_iso) to (ticker, call_date) for each entity.
+
+    Uses the latest call on or before as_of_date per company. Returns only pairs
+    that have a matching call in the DB.
+
+    Args:
+        entity_dates: List of (company_ticker, as_of_date_iso).
+
+    Returns:
+        List of (company_ticker, call_date) pairs.
+    """
+    pairs: list[tuple[str, str]] = []
+    for ticker, as_of_date in entity_dates:
+        resolved = await _resolve_as_of_date(as_of_date, company_ticker=ticker)
+        if resolved:
+            pairs.append(resolved[0])
+    return pairs
+
+
 async def _build_resolved_filters(
     filter_metadata: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
