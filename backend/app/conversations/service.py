@@ -5,7 +5,7 @@ import logging
 from typing import Sequence
 
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ModelRequest
-from sqlalchemy import select
+from sqlalchemy import func, nulls_last, select
 
 from app.models.database import get_session
 from app.models.db_models import ConversationMessage
@@ -44,7 +44,11 @@ async def get_conversation_history(session_id: str) -> list[ModelMessage]:
         result = await session.execute(
             select(ConversationMessage.content)
             .where(ConversationMessage.session_id == session_id)
-            .order_by(ConversationMessage.created_at)
+            .order_by(
+                nulls_last(ConversationMessage.position.asc()),
+                ConversationMessage.created_at.asc(),
+                ConversationMessage.id.asc(),
+            )
         )
         rows = result.scalars().all()
 
@@ -73,6 +77,11 @@ async def append_conversation_messages(
         return
 
     async with get_session() as session:
+        next_pos_result = await session.execute(
+            select(func.coalesce(func.max(ConversationMessage.position), 0))
+            .where(ConversationMessage.session_id == session_id)
+        )
+        next_pos = (next_pos_result.scalar_one() or 0) + 1
         for msg in messages:
             content = _serialize_message(msg)
             role = "request" if isinstance(msg, ModelRequest) else "response"
@@ -80,7 +89,9 @@ async def append_conversation_messages(
                 session_id=session_id,
                 role=role,
                 content=content,
+                position=next_pos,
             )
+            next_pos += 1
             session.add(row)
 
     logger.debug(f"Appended {len(messages)} messages to session {session_id}")
@@ -112,7 +123,11 @@ async def get_conversation_history_for_api(
         result = await session.execute(
             select(ConversationMessage.role, ConversationMessage.content, ConversationMessage.created_at)
             .where(ConversationMessage.session_id == session_id)
-            .order_by(ConversationMessage.created_at)
+            .order_by(
+                nulls_last(ConversationMessage.position.asc()),
+                ConversationMessage.created_at.asc(),
+                ConversationMessage.id.asc(),
+            )
         )
         rows = result.mappings().all()
 

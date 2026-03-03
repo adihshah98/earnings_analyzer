@@ -113,6 +113,7 @@ class ConversationMessage(Base):
     session_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     role: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[list | dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    position: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

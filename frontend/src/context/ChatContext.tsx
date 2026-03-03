@@ -13,7 +13,8 @@ import { createSessionId, loadFromStorage, saveToStorage, truncateTitle } from '
 type ChatState = {
   chats: ChatSession[]
   activeChatId: string | null
-  isSending: boolean
+  sendingChatId: string | null
+  drafts: Record<string, string>
   error: string | null
   sourcesMessageId: string | null
 }
@@ -23,7 +24,8 @@ type ChatAction =
   | { type: 'CREATE_CHAT'; payload: { chat: ChatSession } }
   | { type: 'SET_ACTIVE_CHAT'; payload: { chatId: string } }
   | { type: 'SET_ERROR'; payload: { error: string | null } }
-  | { type: 'SEND_START' }
+  | { type: 'SET_DRAFT'; payload: { chatId: string; value: string } }
+  | { type: 'SEND_START'; payload: { chatId: string } }
   | {
       type: 'SEND_SUCCESS'
       payload: {
@@ -41,7 +43,8 @@ type ChatAction =
 const initialState: ChatState = {
   chats: [],
   activeChatId: null,
-  isSending: false,
+  sendingChatId: null,
+  drafts: {},
   error: null,
   sourcesMessageId: null,
 }
@@ -61,6 +64,7 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
         chats: [action.payload.chat, ...state.chats],
         activeChatId: action.payload.chat.id,
         error: null,
+        sourcesMessageId: null,
       }
     }
     case 'SET_ACTIVE_CHAT': {
@@ -68,6 +72,7 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...state,
         activeChatId: action.payload.chatId,
         error: null,
+        sourcesMessageId: null,
       }
     }
     case 'SET_ERROR': {
@@ -76,18 +81,27 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
         error: action.payload.error,
       }
     }
+    case 'SET_DRAFT': {
+      const { chatId, value } = action.payload
+      return {
+        ...state,
+        drafts: { ...state.drafts, [chatId]: value },
+      }
+    }
     case 'SEND_START': {
       return {
         ...state,
-        isSending: true,
+        sendingChatId: action.payload.chatId,
         error: null,
       }
     }
     case 'SEND_SUCCESS': {
       const { chatId, userMessage, assistantMessage } = action.payload
+      const nextDrafts = { ...state.drafts, [chatId]: '' }
       return {
         ...state,
-        isSending: false,
+        sendingChatId: null,
+        drafts: nextDrafts,
         chats: state.chats.map((chat) =>
           chat.id === chatId
             ? {
@@ -100,14 +114,13 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
               }
             : chat,
         ),
-        sourcesMessageId: assistantMessage.id,
       }
     }
     case 'SEND_ERROR': {
       const { chatId, userMessageId, error } = action.payload
       return {
         ...state,
-        isSending: false,
+        sendingChatId: null,
         error,
         chats: state.chats.map((chat) =>
           chat.id === chatId
@@ -134,11 +147,13 @@ type ChatContextValue = {
   chats: ChatSession[]
   activeChatId: string | null
   activeChat: ChatSession | null
-  isSending: boolean
+  sendingChatId: string | null
+  draftForActiveChat: string
   error: string | null
   sourcesMessageId: string | null
   createNewChat: () => void
   setActiveChat: (chatId: string) => void
+  setDraft: (chatId: string, value: string) => void
   sendMessage: (content: string) => Promise<void>
   setSourcesTarget: (messageId: string | null) => void
 }
@@ -217,7 +232,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         createdAt: new Date().toISOString(),
       }
 
-      dispatch({ type: 'SEND_START' })
+      dispatch({ type: 'SEND_START', payload: { chatId } })
 
       try {
         const response: AgentResponse = await queryAgent({
@@ -262,20 +277,28 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'SET_SOURCES_TARGET', payload: { messageId } })
   }, [])
 
+  const setDraft = useCallback((chatId: string, value: string) => {
+    dispatch({ type: 'SET_DRAFT', payload: { chatId, value } })
+  }, [])
+
   const activeChat = useMemo(
     () => state.chats.find((c) => c.id === state.activeChatId) ?? null,
     [state.chats, state.activeChatId],
   )
 
+  const draftForActiveChat = state.activeChatId ? (state.drafts[state.activeChatId] ?? '') : ''
+
   const value: ChatContextValue = {
     chats: state.chats,
     activeChatId: state.activeChatId,
     activeChat,
-    isSending: state.isSending,
+    sendingChatId: state.sendingChatId,
+    draftForActiveChat,
     error: state.error,
     sourcesMessageId: state.sourcesMessageId,
     createNewChat,
     setActiveChat,
+    setDraft,
     sendMessage,
     setSourcesTarget,
   }

@@ -1,13 +1,14 @@
 """Main PydanticAI knowledge base agent."""
 
 import logging
+from datetime import date
 from typing import Any
 
 from pydantic_ai import Agent, UsageLimits
 
 from app.config import get_settings
 from app.conversations.service import append_conversation_messages, get_conversation_history
-from app.models.schemas import AgentResponse
+from app.models.schemas import AgentResponse, Citation, CitedSpan, SourceDocument
 from app.prompts.templates import SYSTEM_PROMPT_V1
 from app.rag.retriever import get_known_companies
 from app.tools.agent_tools import (
@@ -18,6 +19,53 @@ from app.tools.agent_tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _find_quote_spans(content: str, quote: str) -> list[tuple[int, int]]:
+    """Find all occurrences of quote (exact, stripped) in content. Returns list of (start, end)."""
+    q = quote.strip()
+    if not q:
+        return []
+    spans: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        pos = content.find(q, start)
+        if pos == -1:
+            break
+        spans.append((pos, pos + len(q)))
+        start = pos + 1
+    return spans
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge overlapping or adjacent spans. Input must be (start, end) with end exclusive."""
+    if not spans:
+        return []
+    sorted_spans = sorted(spans, key=lambda s: s[0])
+    merged = [sorted_spans[0]]
+    for start, end in sorted_spans[1:]:
+        if start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _apply_citations_to_sources(
+    sources: list[SourceDocument],
+    citations: list[Citation],
+) -> None:
+    """Fill cited_spans on each source from the model's citations. Mutates sources in place."""
+    for i, source in enumerate(sources):
+        source_1based = i + 1
+        all_spans: list[tuple[int, int]] = []
+        for c in citations:
+            if c.source_index != source_1based:
+                continue
+            all_spans.extend(_find_quote_spans(source.content, c.quote))
+        source.cited_spans = [
+            CitedSpan(start=s, end=e) for s, e in _merge_spans(all_spans)
+        ]
 
 
 def _sanitize_for_prompt(value: str, max_len: int = 200) -> str:
@@ -53,6 +101,7 @@ def _build_system_prompt(
     user_role = _sanitize_for_prompt(deps.user_role)
     user_department = _sanitize_for_prompt(deps.user_department)
     custom_instructions = _sanitize_for_prompt(deps.custom_instructions, max_len=500)
+    today_date = deps.today_date or "unknown"
 
     try:
         return template.format(
@@ -62,10 +111,13 @@ def _build_system_prompt(
             user_department=user_department,
             custom_instructions=custom_instructions,
             known_tickers=known_tickers,
+            today_date=today_date,
         )
     except KeyError:
-        return template.replace("{context}", context).replace(
-            "{known_tickers}", known_tickers
+        return (
+            template.replace("{context}", context)
+            .replace("{known_tickers}", known_tickers)
+            .replace("{today_date}", today_date)
         )
 
 
@@ -137,6 +189,7 @@ async def query_agent(
         search_mode=search_mode,
         retrieval_threshold=retrieval_threshold,
         filter_metadata=filter_metadata or {},
+        today_date=date.today().isoformat(),
     )
 
     system_prompt = SYSTEM_PROMPT_V1
@@ -175,6 +228,21 @@ async def query_agent(
 
     response = result.output
     response._raw_retrieved_chunks = deps.retrieved_chunks
+
+    # Use actual retrieved chunks for sources (real chunk_ids) instead of LLM output
+    # which may use indices like "1", "2" — frontend needs real UUIDs for get transcript
+    response.sources = [
+        SourceDocument(
+            chunk_id=c["chunk_id"],
+            content=c["content"],
+            similarity=c.get("similarity", 0.0),
+            metadata=c.get("metadata", {}),
+        )
+        for c in deps.retrieved_chunks
+    ]
+    # Resolve model citations to character spans for highlighting (no extra LLM call)
+    if response.citations:
+        _apply_citations_to_sources(response.sources, response.citations)
 
     # Persist new messages to conversation history
     if session_id:

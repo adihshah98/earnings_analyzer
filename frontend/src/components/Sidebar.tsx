@@ -9,9 +9,8 @@ export function Sidebar() {
         <div>
           <div className="sidebar-title">Earnings Analyzer</div>
         </div>
-        <button type="button" className="new-chat-button" onClick={createNewChat}>
-          <span>＋</span>
-          <span>New chat</span>
+        <button type="button" className="new-chat-button" onClick={createNewChat} title="New chat">
+          +
         </button>
       </div>
 

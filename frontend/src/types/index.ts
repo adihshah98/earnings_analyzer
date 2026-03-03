@@ -8,11 +8,18 @@ export interface QueryRequest {
   retrieval_threshold?: number | null
 }
 
+export interface CitedSpan {
+  start: number
+  end: number
+}
+
 export interface SourceDocument {
   chunk_id: string
   content: string
   similarity: number
   metadata: Record<string, unknown>
+  /** Character ranges in content that were cited in the answer (for highlighting). */
+  cited_spans?: CitedSpan[]
 }
 
 export interface AgentResponse {

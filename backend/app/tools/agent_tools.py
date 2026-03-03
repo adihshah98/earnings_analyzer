@@ -30,6 +30,7 @@ class AgentDeps:
         search_mode: str | None = None,
         retrieval_threshold: float | None = None,
         filter_metadata: dict[str, Any] | None = None,
+        today_date: str = "",
     ):
         self.session_id = session_id
         self.user_name = user_name
@@ -40,6 +41,7 @@ class AgentDeps:
         self.search_mode = search_mode
         self.retrieval_threshold = retrieval_threshold
         self.filter_metadata = filter_metadata or {}
+        self.today_date = today_date
         self.retrieved_chunks: list[dict[str, Any]] = []
 
 
@@ -62,14 +64,9 @@ async def search_knowledge_base(
         company_ticker: Company ticker to filter results (e.g. ACME, GLBX, INIT).
             ALWAYS set this when the user's question mentions a specific company.
             This prevents cross-company contamination in search results.
-        as_of_date: Reference date for temporal scoping (ISO format, e.g. 2025-01-15).
-            The system returns data from the most recent earnings call ON or BEFORE
-            this date. Use this instead of quarter labels (Q1/Q2/Q3/Q4) because
-            fiscal-year definitions vary by company.
-            - If the user asks for "latest" or does not mention a time period,
-              use today's date or a recent date so the most recent call is selected.
-            - If the user mentions a specific quarter or date, pick a date at the
-              end of that period (e.g. "Q3 2024" → "2024-12-31").
+        as_of_date: Reference date for temporal scoping (ISO format). Omit for "latest"
+            — the system uses today's date automatically. Otherwise use a call_date
+            from list_available_transcripts or a date at end of period (e.g. "Q3 2024" → "2024-12-31").
 
     Returns:
         Formatted string of relevant document chunks.
@@ -79,11 +76,13 @@ async def search_knowledge_base(
     threshold = ctx.deps.retrieval_threshold
 
     # Build filter: API filters from deps, tool params from agent (extracted from query)
+    # Use server-provided today_date when agent omits as_of_date (avoids LLM inventing wrong dates)
     filter_metadata = dict(ctx.deps.filter_metadata)
     if company_ticker:
         filter_metadata["company_ticker"] = company_ticker
-    if as_of_date:
-        filter_metadata["as_of_date"] = as_of_date
+    effective_as_of = as_of_date or (ctx.deps.today_date if ctx.deps.today_date else None)
+    if effective_as_of:
+        filter_metadata["as_of_date"] = effective_as_of
     filter_metadata = filter_metadata or None
 
     logger.info(f"[Tool:search_kb] query='{query}', top_k={top_k}, search_mode={effective_mode}, filters={filter_metadata}")
@@ -128,8 +127,9 @@ async def list_available_transcripts(
 ) -> str:
     """List available earnings call transcripts in the knowledge base.
 
-    Call this when the user asks what data is available, which companies or
-    periods are covered, or to validate before searching.
+    ALWAYS call this FIRST when the user asks about a specific company, before
+    calling search_knowledge_base. Use the returned call dates to choose a valid
+    as_of_date for search. Also call when the user asks what data is available.
 
     Args:
         ctx: The agent run context.

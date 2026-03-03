@@ -1,17 +1,24 @@
-import { useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
 import { useChatContext } from '../context/ChatContext'
 
 export function ChatInput() {
-  const { sendMessage, isSending, error } = useChatContext()
-  const [value, setValue] = useState('')
+  const {
+    sendMessage,
+    error,
+    activeChatId,
+    sendingChatId,
+    draftForActiveChat,
+    setDraft,
+  } = useChatContext()
+
+  const isActiveChatSending = activeChatId != null && sendingChatId === activeChatId
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
-    const trimmed = value.trim()
+    const trimmed = draftForActiveChat.trim()
     if (!trimmed) return
+    if (!activeChatId) return
     await sendMessage(trimmed)
-    setValue('')
   }
 
   const handleKeyDown = async (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -28,13 +35,18 @@ export function ChatInput() {
         <textarea
           className="chat-input-textarea"
           placeholder="Ask about earnings calls, guidance, and more…"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
+          value={draftForActiveChat}
+          onChange={(e) => activeChatId && setDraft(activeChatId, e.target.value)}
           onKeyDown={handleKeyDown}
-          disabled={isSending}
+          disabled={isActiveChatSending}
         />
-        <button type="submit" className="send-button" disabled={isSending || !value.trim()}>
-          {isSending ? 'Thinking…' : 'Send'}
+        <button
+          type="submit"
+          className="send-button"
+          disabled={isActiveChatSending || !draftForActiveChat.trim()}
+          title="Send"
+        >
+          <span className="send-icon" aria-hidden>↑</span>
         </button>
       </div>
       <div className="input-hint">Press Enter to send, Shift+Enter for a new line.</div>

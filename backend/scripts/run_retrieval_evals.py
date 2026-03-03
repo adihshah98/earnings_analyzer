@@ -1,10 +1,10 @@
 """Run retrieval quality evals by calling the deployed API.
 
 Usage:
+  cd backend && python scripts/run_retrieval_evals.py [dataset]
   cd backend && python scripts/run_retrieval_evals.py [dataset] --base-url http://localhost:8000
-  BASE_URL=https://api.example.com ADMIN_KEY=secret python scripts/run_retrieval_evals.py acme_eval
 
-Defaults: base-url=http://localhost:8000, admin-key from ADMIN_KEY env.
+Defaults: base-url from BASE_URL env or deployment URL, admin-key from ADMIN_KEY or ADMIN_API_KEY env.
 """
 
 import argparse
@@ -21,17 +21,26 @@ except ImportError:
     print("ERROR: httpx required. pip install httpx")
     sys.exit(1)
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 BACKEND_ROOT = SCRIPT_DIR.parent
 DEFAULT_EVAL_RESULTS_DIR = BACKEND_ROOT / "eval_results"
-DEFAULT_BASE_URL = "http://localhost:8000"
+DEFAULT_BASE_URL = "https://earnings-analyzer-dud6.onrender.com"
+
+# Load backend/.env so BASE_URL and ADMIN_KEY/ADMIN_API_KEY are available
+if load_dotenv:
+    load_dotenv(BACKEND_ROOT / ".env")
 
 
 async def _list_datasets(base_url: str, admin_key: str) -> list[str]:
     """Call GET /evals/datasets."""
     url = f"{base_url.rstrip('/')}/evals/datasets"
     headers = {"X-Admin-Key": admin_key} if admin_key else {}
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         return resp.json()
@@ -47,7 +56,7 @@ async def _run_retrieval_eval(
     url = f"{base_url.rstrip('/')}/evals/retrieval"
     params = {"dataset_name": dataset_name, "top_k": top_k}
     headers = {"X-Admin-Key": admin_key} if admin_key else {}
-    async with httpx.AsyncClient(timeout=300.0) as client:
+    async with httpx.AsyncClient(timeout=900.0) as client:
         resp = await client.post(url, params=params, headers=headers)
         resp.raise_for_status()
         return resp.json()
@@ -85,8 +94,8 @@ async def main() -> None:
     )
     parser.add_argument(
         "--admin-key",
-        default=os.environ.get("ADMIN_KEY", ""),
-        help="Admin API key (X-Admin-Key). Use ADMIN_KEY env for local dev.",
+        default=os.environ.get("ADMIN_KEY") or os.environ.get("ADMIN_API_KEY", ""),
+        help="Admin API key (X-Admin-Key). From ADMIN_KEY or ADMIN_API_KEY env.",
     )
     parser.add_argument(
         "--top-k",

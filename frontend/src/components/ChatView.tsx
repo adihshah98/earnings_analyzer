@@ -4,7 +4,9 @@ import { MessageBubble } from './MessageBubble'
 import { ChatInput } from './ChatInput'
 
 export function ChatView() {
-  const { activeChat, isSending, setSourcesTarget } = useChatContext()
+  const { activeChat, sendingChatId, setSourcesTarget } = useChatContext()
+  const isActiveChatSending =
+    activeChat != null && sendingChatId === activeChat.id
   const listRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -39,11 +41,11 @@ export function ChatView() {
         <div>
           <div className="chat-header-title">{activeChat.title || 'Conversation'}</div>
           <div className="chat-header-subtitle">
-            Session ID {activeChat.id.slice(0, 8)} · {activeChat.messages.length} message
+            {activeChat.messages.length} message
             {activeChat.messages.length === 1 ? '' : 's'}
           </div>
         </div>
-        {isSending && <div className="typing-indicator">Thinking…</div>}
+        {isActiveChatSending && <div className="typing-indicator">Thinking…</div>}
       </header>
 
       <div className="chat-messages" ref={listRef}>

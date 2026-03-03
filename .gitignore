@@ -26,6 +26,12 @@ __pycache__/
 # Node (frontend)
 node_modules/
 
+# Eval outputs
+backend/eval_results/
+
+# Transcripts (user data)
+backend/transcripts/
+
 # Build / dist
 dist/
 build/

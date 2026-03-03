@@ -40,12 +40,28 @@ class QueryRequest(BaseModel):
     )
 
 
+class CitedSpan(BaseModel):
+    """Character range in source content that was cited in the answer."""
+    start: int = Field(..., ge=0, description="Start index (inclusive)")
+    end: int = Field(..., ge=0, description="End index (exclusive)")
+
+
 class SourceDocument(BaseModel):
     """Retrieved chunk: used as source in agent responses and RAG semantic search results."""
     chunk_id: str
     content: str
     similarity: float
     metadata: dict[str, Any] = {}
+    cited_spans: list[CitedSpan] = Field(
+        default_factory=list,
+        description="Character ranges in content that were cited in the answer (for highlighting).",
+    )
+
+
+class Citation(BaseModel):
+    """A quote from context used in the answer. source_index is 1-based (Source 1, Source 2, ...)."""
+    source_index: int = Field(..., ge=1, description="1-based index of the source in the context")
+    quote: str = Field(..., min_length=1, description="Exact or close quote from that source used in the answer")
 
 
 class AgentResponse(BaseModel):
@@ -58,6 +74,10 @@ class AgentResponse(BaseModel):
         le=1.0,
     )
     sources: list[SourceDocument] = []
+    citations: list[Citation] = Field(
+        default_factory=list,
+        description="Quotes from the context used in the answer. source_index is 1-based (Source 1 = 1).",
+    )
     reasoning: str | None = Field(None, description="Chain-of-thought reasoning")
     tool_calls_made: list[str] = []
     _raw_retrieved_chunks: list[dict[str, Any]] = PrivateAttr(default_factory=list)

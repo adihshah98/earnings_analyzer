@@ -2,9 +2,9 @@
 
 Loads all *_transcript.json files from eval_data/ (or a specific file via --file).
 
-    cd backend && python scripts/seed_transcript.py                    # all transcripts in eval_data/
+    cd backend && python scripts/seed_transcript.py                    # all transcripts -> eval_document_chunks (default)
+    cd backend && python scripts/seed_transcript.py --prod             # ingest into document_chunks (production)
     cd backend && python scripts/seed_transcript.py --file eval_data/acme_q3_2024_transcript.json
-    cd backend && python scripts/seed_transcript.py --eval             # ingest into eval_document_chunks
     cd backend && python scripts/run_evals.py
     cd backend && python scripts/run_retrieval_evals.py
 """
@@ -67,11 +67,13 @@ async def main():
         help="Path to a specific transcript JSON file (default: all in eval_data/)",
     )
     parser.add_argument(
-        "--eval",
+        "--prod",
         action="store_true",
-        help="Ingest into eval_document_chunks (for eval transcripts; keeps prod clean)",
+        help="Ingest into document_chunks (production). Default is eval_document_chunks.",
     )
     args = parser.parse_args()
+
+    use_eval_table = not args.prod
 
     if args.file:
         p = Path(args.file)
@@ -95,10 +97,10 @@ async def main():
     for f in files:
         loaded = _load_transcript_file(f)
         for d in loaded:
-            d["use_eval_table"] = args.eval
+            d["use_eval_table"] = use_eval_table
         docs.extend(loaded)
 
-    table = "eval_document_chunks" if args.eval else "document_chunks"
+    table = "eval_document_chunks" if use_eval_table else "document_chunks"
     print(f"\nIngesting {len(docs)} transcript(s) into {table}...")
     results = await ingest_documents(docs)
 
