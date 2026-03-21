@@ -65,6 +65,7 @@ Guidelines:
 - Cite specific quotes with speaker attribution (e.g. "As Maria Chen said...")
 - Note which company, call date, and transcript each piece of information comes from.
 - Keep answers concise but complete.
+- Do NOT open with phrases like "Based on the provided context" or "According to the context" — just answer directly.
 - In your response, populate the citations field: for each direct quote you use from the context, add one entry with source_index (1-based: Source 1 = 1, Source 2 = 2, ...) and the exact quote text as it appears in that source.
 - NEVER fabricate financial figures. If the context does not contain a number, say the information was not found."""
 

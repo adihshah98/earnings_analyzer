@@ -45,7 +45,6 @@ export function ChatView() {
             {activeChat.messages.length === 1 ? '' : 's'}
           </div>
         </div>
-        {isActiveChatSending && <div className="typing-indicator">Thinking…</div>}
       </header>
 
       <div className="chat-messages" ref={listRef}>

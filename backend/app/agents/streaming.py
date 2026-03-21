@@ -29,10 +29,12 @@ from app.rag.retriever import (
 logger = logging.getLogger(__name__)
 
 
-async def _append_conversation_turn_background(session_id: str, query: str, answer: str) -> None:
+async def _append_conversation_turn_background(
+    session_id: str, query: str, answer: str, user_id: str | None = None
+) -> None:
     """Fire-and-forget: persist conversation turn without blocking the response."""
     try:
-        await append_conversation_turn(session_id, query, answer)
+        await append_conversation_turn(session_id, query, answer, user_id=user_id)
     except Exception as e:
         logger.warning("Failed to persist conversation turn (background): %s", e)
 
@@ -242,6 +244,7 @@ async def stream_simple_rag_or_agent(
     session_id: str | None,
     search_mode: str | None,
     retrieval_threshold: float | None,
+    user_id: str | None = None,
 ):
     """Async generator: yields ('delta', text) for token chunks, then ('done', payload dict)."""
     t_prepare = time.perf_counter()
@@ -309,7 +312,9 @@ async def stream_simple_rag_or_agent(
             "cited_spans": [{"start": s["start"], "end": s["end"]} for s in raw_spans],
         })
     if session_id:
-        asyncio.create_task(_append_conversation_turn_background(session_id, query, answer))
+        asyncio.create_task(
+            _append_conversation_turn_background(session_id, query, answer, user_id=user_id)
+        )
     payload = {
         "answer": answer,
         "confidence": 0.9,

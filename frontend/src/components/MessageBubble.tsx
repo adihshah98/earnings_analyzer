@@ -17,6 +17,12 @@ export function MessageBubble({ message, onToggleSources, isSourcesShown }: Prop
         <div className="message-content">
           {isUser ? (
             message.content
+          ) : message.content === '' ? (
+            <div className="thinking-dots">
+              <span className="thinking-dot" />
+              <span className="thinking-dot" />
+              <span className="thinking-dot" />
+            </div>
           ) : (
             <ReactMarkdown>{message.content}</ReactMarkdown>
           )}

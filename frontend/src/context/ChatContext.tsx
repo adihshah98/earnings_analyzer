@@ -163,6 +163,7 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return {
         ...state,
         sendingChatId: action.payload.chatId,
+        drafts: { ...state.drafts, [action.payload.chatId]: '' },
         error: null,
         sourcesMessageId: null,
       }

@@ -8,6 +8,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Computed,
     DateTime,
+    ForeignKey,
     Integer,
     String,
     Text,
@@ -21,6 +22,29 @@ class Base(DeclarativeBase):
     """Declarative base for SQLAlchemy models."""
 
     pass
+
+
+class User(Base):
+    """Authenticated users (Google OAuth)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    google_id: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    email: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    avatar_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, server_default=text("now()")
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, server_default=text("now()")
+    )
 
 
 class DocumentChunk(Base):
@@ -111,6 +135,12 @@ class ConversationMessage(Base):
         server_default=text("gen_random_uuid()"),
     )
     session_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     role: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[list | dict[str, Any]] = mapped_column(JSONB, nullable=False)
     position: Mapped[int | None] = mapped_column(nullable=True)

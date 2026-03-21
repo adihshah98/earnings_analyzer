@@ -5,8 +5,14 @@ import type {
   QueryRequest,
   TranscriptResponse,
 } from '../types'
+import { getStoredToken } from '../context/AuthContext'
 
 const API_BASE = import.meta.env.VITE_API_URL || ''
+
+function getAuthHeaders(): HeadersInit {
+  const token = getStoredToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
 
 const JSON_HEADERS: HeadersInit = {
   'Content-Type': 'application/json',
@@ -32,7 +38,7 @@ export async function* queryAgentStream(
 ): AsyncGenerator<StreamEvent, void, unknown> {
   const res = await fetch(`${API_BASE}/agent/query`, {
     method: 'POST',
-    headers: JSON_HEADERS,
+    headers: { ...JSON_HEADERS, ...getAuthHeaders() },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -84,7 +90,7 @@ export async function getTranscriptByChunkId(
 ): Promise<TranscriptResponse> {
   const res = await fetch(
     `${API_BASE}/rag/chunks/${encodeURIComponent(chunkId)}/transcript`,
-    { method: 'GET' },
+    { method: 'GET', headers: getAuthHeaders() },
   )
   return handleResponse<TranscriptResponse>(res)
 }
@@ -95,6 +101,7 @@ export async function getConversationSessions(): Promise<
 > {
   const res = await fetch(`${API_BASE}/conversations/sessions`, {
     method: 'GET',
+    headers: getAuthHeaders(),
   })
   return handleResponse<ConversationSessionSummary[]>(res)
 }
@@ -105,7 +112,7 @@ export async function getConversationHistory(
 ): Promise<ConversationHistoryEntry[]> {
   const res = await fetch(
     `${API_BASE}/conversations/${encodeURIComponent(sessionId)}/history`,
-    { method: 'GET' },
+    { method: 'GET', headers: getAuthHeaders() },
   )
   return handleResponse<ConversationHistoryEntry[]>(res)
 }
@@ -114,7 +121,7 @@ export async function getConversationHistory(
 export async function deleteConversation(sessionId: string): Promise<void> {
   const res = await fetch(
     `${API_BASE}/conversations/${encodeURIComponent(sessionId)}`,
-    { method: 'DELETE' },
+    { method: 'DELETE', headers: getAuthHeaders() },
   )
   if (!res.ok) {
     const text = await res.text().catch(() => '')

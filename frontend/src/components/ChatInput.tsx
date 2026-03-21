@@ -38,7 +38,6 @@ export function ChatInput() {
           value={draftForActiveChat}
           onChange={(e) => activeChatId && setDraft(activeChatId, e.target.value)}
           onKeyDown={handleKeyDown}
-          disabled={isActiveChatSending}
         />
         <button
           type="submit"

@@ -39,6 +39,15 @@ class Settings(BaseSettings):
     # Evals
     eval_concurrency: int = 3
 
+    # Auth (Google OAuth + JWT)
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    jwt_secret: str = "dev-secret-change-in-production"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_days: int = 30
+    frontend_url: str = "http://localhost:5173"
+    backend_url: str = "http://localhost:8000"  # used as OAuth redirect_uri base
+
     # Server
     log_level: str = "INFO"
     admin_api_key: str = ""  # empty = admin routes unprotected (dev only)

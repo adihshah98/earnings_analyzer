@@ -26,7 +26,7 @@ _SCOPE_CACHE: TTLCache = TTLCache(maxsize=500, ttl=86400)
 _QUARTER_END = {"1": "03-31", "2": "06-30", "3": "09-30", "4": "12-31"}
 
 # Entity resolution: small fast model, low max_tokens to minimize latency
-_RESOLUTION_MODEL = "gpt-4o-mini"
+_RESOLUTION_MODEL = "gpt-4.1-nano"
 _RESOLUTION_MAX_TOKENS = 120
 
 # (company_ticker, date_expression) per entity; ticker is validated against known companies

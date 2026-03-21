@@ -1,8 +1,10 @@
+import { useAuth } from '../context/AuthContext'
 import { useChatContext } from '../context/ChatContext'
 
 export function Sidebar() {
   const { chats, activeChatId, createNewChat, setActiveChat, deleteChat } =
     useChatContext()
+  const { user, logout } = useAuth()
 
   return (
     <aside className="sidebar">
@@ -55,6 +57,22 @@ export function Sidebar() {
           ))
         )}
       </div>
+
+      {user && (
+        <div className="sidebar-user">
+          {user.avatar_url ? (
+            <img src={user.avatar_url} alt={user.name} className="sidebar-user-avatar" />
+          ) : (
+            <div className="sidebar-user-avatar-placeholder">
+              {user.name.charAt(0).toUpperCase()}
+            </div>
+          )}
+          <span className="sidebar-user-name">{user.name}</span>
+          <button type="button" className="sidebar-logout-btn" onClick={logout} title="Sign out">
+            Sign out
+          </button>
+        </div>
+      )}
     </aside>
   )
 }

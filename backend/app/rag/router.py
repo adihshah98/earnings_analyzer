@@ -16,7 +16,7 @@ from app.models.schemas import (
     SourceDocument,
 )
 from app.rag.ingestion import ingest_document
-from app.rag.retriever import get_transcript_by_chunk_id, retrieve_by_doc_id, retrieve_relevant_chunks
+from app.rag.retriever import _COMPANIES_CACHE, get_transcript_by_chunk_id, retrieve_by_doc_id, retrieve_relevant_chunks
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/rag", tags=["rag"])
@@ -128,6 +128,7 @@ async def ingest_manual_upload(
         use_transcript_chunking=True,
         use_eval_table=use_eval_table,
     )
+    _COMPANIES_CACHE.clear()
     return IngestResult(**result)
 
 

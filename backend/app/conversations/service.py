@@ -66,6 +66,7 @@ async def get_conversation_history(session_id: str) -> list[ModelMessage]:
 async def append_conversation_messages(
     session_id: str,
     messages: Sequence[ModelMessage],
+    user_id: str | None = None,
 ) -> None:
     """Append new messages to a conversation session.
 
@@ -82,11 +83,14 @@ async def append_conversation_messages(
             .where(ConversationMessage.session_id == session_id)
         )
         next_pos = (next_pos_result.scalar_one() or 0) + 1
+        import uuid as _uuid
+        parsed_user_id = _uuid.UUID(user_id) if user_id else None
         for msg in messages:
             content = _serialize_message(msg)
             role = "request" if isinstance(msg, ModelRequest) else "response"
             row = ConversationMessage(
                 session_id=session_id,
+                user_id=parsed_user_id,
                 role=role,
                 content=content,
                 position=next_pos,
@@ -101,6 +105,7 @@ async def append_conversation_turn(
     session_id: str,
     user_text: str,
     assistant_text: str,
+    user_id: str | None = None,
 ) -> None:
     """Append a user+assistant turn to a session. Wrapper for simple text persistence.
 
@@ -115,24 +120,27 @@ async def append_conversation_turn(
 
     request = ModelRequest(parts=[UserPromptPart(content=user_text)])
     response = ModelResponse(parts=[TextPart(content=assistant_text)])
-    await append_conversation_messages(session_id, [request, response])
+    await append_conversation_messages(session_id, [request, response], user_id=user_id)
 
 
-async def list_sessions() -> list[tuple[str, object]]:
-    """List all conversation session IDs with their last activity time.
+async def list_sessions(user_id: str | None = None) -> list[tuple[str, object]]:
+    """List conversation session IDs with their last activity time.
+
+    If user_id is provided, returns only sessions belonging to that user.
 
     Returns:
         List of (session_id, updated_at) tuples, newest first.
     """
+    import uuid as _uuid
     async with get_session() as session:
-        subq = (
-            select(
-                ConversationMessage.session_id,
-                func.max(ConversationMessage.created_at).label("updated_at"),
-            )
-            .group_by(ConversationMessage.session_id)
-            .subquery()
+        q = select(
+            ConversationMessage.session_id,
+            func.max(ConversationMessage.created_at).label("updated_at"),
         )
+        if user_id:
+            q = q.where(ConversationMessage.user_id == _uuid.UUID(user_id))
+        q = q.group_by(ConversationMessage.session_id)
+        subq = q.subquery()
         result = await session.execute(
             select(subq.c.session_id, subq.c.updated_at).order_by(
                 subq.c.updated_at.desc().nulls_last()

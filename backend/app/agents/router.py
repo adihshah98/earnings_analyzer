@@ -3,9 +3,10 @@
 import json
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from app.auth.dependencies import get_optional_user
 from app.config import get_settings
 from app.models.schemas import QueryRequest
 
@@ -27,9 +28,10 @@ def _get_request_params(request: QueryRequest):
 
 
 @router.post("/query")
-async def agent_query(request: QueryRequest):
+async def agent_query(request: QueryRequest, user: dict | None = Depends(get_optional_user)):
     """Query the knowledge base agent. Returns SSE stream: delta events then a final 'done' event with answer, sources, confidence."""
     params = _get_request_params(request)
+    user_id = user["sub"] if user else None
 
     async def event_stream():
         from app.agents.streaming import stream_simple_rag_or_agent
@@ -39,6 +41,7 @@ async def agent_query(request: QueryRequest):
             session_id=params["session_id"],
             search_mode=params["search_mode"],
             retrieval_threshold=params["retrieval_threshold"],
+            user_id=user_id,
         ):
             if event_type == "delta":
                 yield f"data: {json.dumps({'type': 'delta', 'text': payload})}\n\n"

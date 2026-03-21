@@ -3,9 +3,10 @@
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.auth.dependencies import require_user
 from app.conversations.service import (
     delete_session,
     get_conversation_history_for_api,
@@ -32,9 +33,9 @@ class HistoryEntry(BaseModel):
 
 
 @router.get("/sessions", response_model=list[SessionSummary])
-async def get_sessions():
-    """List all conversation sessions, newest first."""
-    rows = await list_sessions()
+async def get_sessions(user: dict = Depends(require_user)):
+    """List conversation sessions for the authenticated user, newest first."""
+    rows = await list_sessions(user_id=user["sub"])
     return [
         SessionSummary(session_id=session_id, updated_at=updated_at)
         for session_id, updated_at in rows
@@ -42,7 +43,7 @@ async def get_sessions():
 
 
 @router.delete("/{session_id}")
-async def delete_conversation(session_id: str):
+async def delete_conversation(session_id: str, user: dict = Depends(require_user)):
     """Delete a conversation session and all its messages."""
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
@@ -51,7 +52,7 @@ async def delete_conversation(session_id: str):
 
 
 @router.get("/{session_id}/history", response_model=list[HistoryEntry])
-async def get_history(session_id: str):
+async def get_history(session_id: str, user: dict = Depends(require_user)):
     """Get conversation history for a session.
 
     Returns messages in chronological order. Each entry includes
