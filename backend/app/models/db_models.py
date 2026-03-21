@@ -76,6 +76,8 @@ class DocumentChunk(Base):
         nullable=True,
         deferred=True,
     )
+    company_ticker: Mapped[str | None] = mapped_column(String, nullable=True, index=False)
+    call_date: Mapped[str | None] = mapped_column(String, nullable=True, index=False)
     source_doc_id: Mapped[str | None] = mapped_column(String, nullable=True)
     chunk_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(
@@ -114,6 +116,8 @@ class EvalDocumentChunk(Base):
         nullable=True,
         deferred=True,
     )
+    company_ticker: Mapped[str | None] = mapped_column(String, nullable=True, index=False)
+    call_date: Mapped[str | None] = mapped_column(String, nullable=True, index=False)
     source_doc_id: Mapped[str | None] = mapped_column(String, nullable=True)
     chunk_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(

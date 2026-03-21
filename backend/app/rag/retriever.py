@@ -115,20 +115,18 @@ async def _resolve_as_of_date(
         return _DATE_RESOLUTION_CACHE[cache_key]
 
     Chunk = _get_chunk_model()
-    ticker_col = Chunk.chunk_metadata["company_ticker"].astext
-    date_col = Chunk.chunk_metadata["call_date"].astext
 
     stmt = (
         select(
-            ticker_col.label("company_ticker"),
-            func.max(date_col).label("call_date"),
+            Chunk.company_ticker.label("company_ticker"),
+            func.max(Chunk.call_date).label("call_date"),
         )
-        .where(Chunk.chunk_metadata["call_date"].isnot(None))
-        .where(date_col <= as_of_date)
-        .group_by(ticker_col)
+        .where(Chunk.call_date.isnot(None))
+        .where(Chunk.call_date <= as_of_date)
+        .group_by(Chunk.company_ticker)
     )
     if company_ticker:
-        stmt = stmt.where(ticker_col == company_ticker)
+        stmt = stmt.where(Chunk.company_ticker == company_ticker)
 
     async with get_session() as session:
         result = await session.execute(stmt)
@@ -170,7 +168,7 @@ async def _resolve_entity_dates_batch(
     as_of_dates = [as_of for _, as_of in entity_dates]
 
     t0 = time.perf_counter()
-    # Single query: unnest + LATERAL to resolve all pairs (column is "metadata" in DB)
+    # Single query: unnest + LATERAL to resolve all pairs using real indexed columns
     stmt = text(f"""
         WITH inputs(ticker, as_of_date) AS (
             SELECT * FROM unnest(CAST(:tickers AS text[]), CAST(:as_of_dates AS text[])) AS t(ticker, as_of_date)
@@ -178,11 +176,11 @@ async def _resolve_entity_dates_batch(
         SELECT i.ticker, l.call_date
         FROM inputs i,
         LATERAL (
-            SELECT MAX((c.metadata->>'call_date')) AS call_date
+            SELECT MAX(c.call_date) AS call_date
             FROM {table_name} c
-            WHERE c.metadata->>'company_ticker' = i.ticker
-              AND c.metadata->>'call_date' <= i.as_of_date
-              AND c.metadata->>'call_date' IS NOT NULL
+            WHERE c.company_ticker = i.ticker
+              AND c.call_date <= i.as_of_date
+              AND c.call_date IS NOT NULL
         ) l
         WHERE l.call_date IS NOT NULL
     """)
@@ -255,10 +253,8 @@ def _apply_metadata_filters(stmt, filter_metadata: dict[str, Any] | None, chunk_
 
     resolved_pairs = filter_metadata.get("_resolved_date_pairs")
     if resolved_pairs:
-        ticker_col = Chunk.chunk_metadata["company_ticker"].astext
-        date_col = Chunk.chunk_metadata["call_date"].astext
         conditions = [
-            and_(ticker_col == ticker, date_col == call_date)
+            and_(Chunk.company_ticker == ticker, Chunk.call_date == call_date)
             for ticker, call_date in resolved_pairs
         ]
         stmt = stmt.where(or_(*conditions))
@@ -266,11 +262,15 @@ def _apply_metadata_filters(stmt, filter_metadata: dict[str, Any] | None, chunk_
     for key, value in filter_metadata.items():
         if key.startswith("_"):
             continue
-        if key == "company_ticker" and resolved_pairs:
+        if resolved_pairs and key in ("company_ticker", "call_date"):
             continue
-        stmt = stmt.where(
-            Chunk.chunk_metadata[key].astext == str(value)
-        )
+        # Use real columns for the two indexed fields; fall back to JSONB for others
+        if key == "company_ticker":
+            stmt = stmt.where(Chunk.company_ticker == str(value))
+        elif key == "call_date":
+            stmt = stmt.where(Chunk.call_date == str(value))
+        else:
+            stmt = stmt.where(Chunk.chunk_metadata[key].astext == str(value))
     return stmt
 
 
@@ -542,23 +542,21 @@ async def list_available_transcripts(
         List of dicts with company_ticker, call_date, title (from metadata).
     """
     Chunk = _get_chunk_model()
-    ticker_col = Chunk.chunk_metadata["company_ticker"].astext
-    date_col = Chunk.chunk_metadata["call_date"].astext
     title_col = Chunk.chunk_metadata["title"].astext
 
     stmt = (
         select(
-            ticker_col.label("company_ticker"),
-            date_col.label("call_date"),
+            Chunk.company_ticker.label("company_ticker"),
+            Chunk.call_date.label("call_date"),
             func.max(title_col).label("title"),
         )
-        .where(Chunk.chunk_metadata["company_ticker"].isnot(None))
-        .where(Chunk.chunk_metadata["call_date"].isnot(None))
-        .group_by(ticker_col, date_col)
-        .order_by(desc(date_col))
+        .where(Chunk.company_ticker.isnot(None))
+        .where(Chunk.call_date.isnot(None))
+        .group_by(Chunk.company_ticker, Chunk.call_date)
+        .order_by(desc(Chunk.call_date))
     )
     if company_ticker:
-        stmt = stmt.where(ticker_col == company_ticker)
+        stmt = stmt.where(Chunk.company_ticker == company_ticker)
 
     async with get_session() as session:
         result = await session.execute(stmt)
@@ -604,17 +602,16 @@ async def get_known_companies() -> list[dict[str, str]]:
 async def _get_known_companies_impl() -> list[dict[str, str]]:
     """Internal: query companies from DB (uncached)."""
     Chunk = _get_chunk_model()
-    ticker_col = Chunk.chunk_metadata["company_ticker"].astext
     title_col = Chunk.chunk_metadata["title"].astext
 
     stmt = (
         select(
-            ticker_col.label("company_ticker"),
+            Chunk.company_ticker.label("company_ticker"),
             func.max(title_col).label("title"),
         )
-        .where(Chunk.chunk_metadata["company_ticker"].isnot(None))
-        .group_by(ticker_col)
-        .order_by(ticker_col)
+        .where(Chunk.company_ticker.isnot(None))
+        .group_by(Chunk.company_ticker)
+        .order_by(Chunk.company_ticker)
     )
 
     async with get_session() as session:

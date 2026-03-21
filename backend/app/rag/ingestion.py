@@ -328,6 +328,8 @@ async def ingest_document(
                 embedding=embedding,
                 source_doc_id=doc_id,
                 chunk_index=i,
+                company_ticker=ticker,
+                call_date=str(call_date) if call_date else None,
             )
             session.add(row)
 

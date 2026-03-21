@@ -4,9 +4,7 @@ import { MessageBubble } from './MessageBubble'
 import { ChatInput } from './ChatInput'
 
 export function ChatView() {
-  const { activeChat, sendingChatId, sourcesMessageId, setSourcesTarget } = useChatContext()
-  const isActiveChatSending =
-    activeChat != null && sendingChatId === activeChat.id
+  const { activeChat, sourcesMessageId, setSourcesTarget } = useChatContext()
   const listRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
