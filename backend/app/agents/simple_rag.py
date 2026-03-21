@@ -4,6 +4,7 @@ Entity (company) and date are resolved via a cheap LLM call returning a list of
 (entity, date) pairs. All queries use this path.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -13,9 +14,14 @@ from typing import Any
 
 from cachetools import TTLCache
 
+from app.config import get_settings
 from app.conversations.service import get_recent_user_queries
 from app.rag.embeddings import get_openai_client
-from app.rag.retriever import resolve_entities_to_call_dates, retrieve_relevant_chunks
+from app.rag.retriever import (
+    resolve_entities_to_call_dates,
+    resolve_entities_to_call_dates_in_ranges,
+    retrieve_relevant_chunks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +31,11 @@ _SCOPE_CACHE: TTLCache = TTLCache(maxsize=500, ttl=86400)
 # Quarter end dates (approximate): Q1 -> Mar 31, Q2 -> Jun 30, Q3 -> Sep 30, Q4 -> Dec 31
 _QUARTER_END = {"1": "03-31", "2": "06-30", "3": "09-30", "4": "12-31"}
 
-# Entity resolution: small fast model, low max_tokens to minimize latency
-_RESOLUTION_MODEL = "gpt-4.1-nano"
-_RESOLUTION_MAX_TOKENS = 120
+_RESOLUTION_MAX_TOKENS = 300  # increased to handle date_range objects
 
-# (company_ticker, date_expression) per entity; ticker is validated against known companies
-ResolvedEntity = tuple[str, str | None]
+# (company_ticker, date_expression, date_range_start, date_range_end)
+# date_range_start/end are ISO strings for range queries; date_expression for single-period queries.
+ResolvedEntity = tuple[str, str | None, str | None, str | None]
 
 
 def _extract_text_from_responses_output(output: list) -> str:
@@ -46,11 +51,13 @@ def _extract_text_from_responses_output(output: list) -> str:
 
 @dataclass
 class SimpleRAGScope:
-    """Resolved scope for retrieval and LLM."""
+    """Resolved scope for retrieval.
 
-    company_ticker: str | None
-    as_of_date: str | None
-    # For multi-entity: pre-resolved (ticker, call_date) pairs; enables single retrieval with OR filter.
+    Always expressed as pre-resolved (ticker, call_date) pairs so the retriever uses
+    a single OR-filter regardless of how many companies or time periods are involved.
+    None means no filter (full-corpus search).
+    """
+
     resolved_date_pairs: list[tuple[str, str]] | None = None
 
 
@@ -107,19 +114,69 @@ async def _resolve_entities_via_llm(
         return []
     valid_tickers = {c.get("ticker", "").upper() for c in companies if c.get("ticker")}
     company_list = ", ".join(f"{c.get('ticker', '').upper()}: {c.get('name', '')}" for c in companies if c.get("ticker"))
+    # Precompute range helpers for the prompt
+    try:
+        y, m, _ = map(int, today_iso.split("-"))
+        last_year_start = f"{y - 1}-01-01"
+        last_year_end = f"{y - 1}-12-31"
+        # Trailing 12 months start
+        trailing_start_y, trailing_start_m = (y - 1, m) if m > 1 else (y - 2, 12)
+        trailing_12_start = f"{trailing_start_y}-{trailing_start_m:02d}-01"
+        # Last N quarters: start = first day of quarter N quarters before current quarter
+        def _quarter_start_n_ago(n: int) -> str:
+            current_q = (m - 1) // 3  # 0=Q1,1=Q2,2=Q3,3=Q4
+            total_q = y * 4 + current_q - n
+            qy, qq = total_q // 4, total_q % 4
+            return f"{qy}-{qq * 3 + 1:02d}-01"
+        last_4q_start = _quarter_start_n_ago(4)
+        last_2q_start = _quarter_start_n_ago(2)
+    except (ValueError, AttributeError):
+        last_year_start, last_year_end, trailing_12_start = f"{today_iso[:4]}-01-01", f"{today_iso[:4]}-12-31", today_iso
+        last_4q_start = last_2q_start = f"{today_iso[:4]}-01-01"
+
     prompt = f"""Today's date is {today_iso}.
 
 Available companies (ticker: name): {company_list}
 
-From the user query, extract a list of (company, date) pairs the user is asking about.
-- Single company / single period: return one object, e.g. [{{ "company_ticker": "ACME", "date_expression": "last_quarter" }}].
-- Comparing multiple companies: return one object per company, e.g. [{{ "company_ticker": "ACME", "date_expression": "last_quarter" }}, {{ "company_ticker": "GLOBEX", "date_expression": "last_quarter" }}].
-- Same company, multiple time periods (e.g. "change from previous quarter", "vs last quarter", "quarter over quarter"): return multiple objects with the same company_ticker and the two date_expressions, e.g. [{{ "company_ticker": "NOW", "date_expression": "last_quarter" }}, {{ "company_ticker": "NOW", "date_expression": "current_quarter" }}].
-- Multiple companies, multiple time periods: return one object per company&time period combo, e.g. [{{ "company_ticker": "ACME", "date_expression": "last_quarter" }}, {{ "company_ticker": "ACME", "date_expression": "current_quarter" }}, {{ "company_ticker": "GLOBEX", "date_expression": "last_quarter" }}, {{ "company_ticker": "GLOBEX", "date_expression": "current_quarter" }}].
-- Use only tickers from the list above. date_expression: YYYY-MM-DD, "Q1 2024" style, "last_quarter", "current_quarter", or null for latest.
-- If the query is unclear or has no specific company, return an empty list [].
+From the user query, extract a list of company/date entities the user is asking about.
+Each object has: "company_ticker", and EITHER "date_expression" (single period) OR "date_range" (multi-period).
 
-Reply with only a JSON object: {{ "entities": [ {{ "company_ticker": "<ticker>", "date_expression": "<date or null>" }}, ... ] }}
+SINGLE-PERIOD rules (use "date_expression", set "date_range": null):
+- Single company / single period: [{{"company_ticker": "ACME", "date_expression": "last_quarter", "date_range": null}}]
+- Comparing multiple companies for same period: [{{"company_ticker": "ACME", "date_expression": "last_quarter", "date_range": null}}, {{"company_ticker": "GLOBEX", "date_expression": "last_quarter", "date_range": null}}]
+- Same company, two specific periods (QoQ, YoY): [{{"company_ticker": "NOW", "date_expression": "last_quarter", "date_range": null}}, {{"company_ticker": "NOW", "date_expression": "current_quarter", "date_range": null}}]
+- date_expression values: YYYY-MM-DD, "Q1 2024" style, "last_quarter", "current_quarter", or null for latest (most recent call only).
+- DEFAULT (no date mentioned, no prior date context): use date_expression: null — this returns only the MOST RECENT call. NEVER default to a date_range just because no date is specified.
+
+MULTI-PERIOD rules (use "date_range", set "date_expression": null) — use when the query spans multiple quarters or years.
+Trigger this for ANY expression implying more than one period: exact counts ("last 4 quarters"), vague counts ("few quarters", "couple of quarters", "several years", "a few years"), named periods ("last year", "FY2024", "H1 2025"), or open-ended ("over time", "historically", "trailing 12 months").
+Vague quantity defaults: "couple" = 2, "few" = 3, "several" = 5.
+Quarter boundaries: Q1 = Jan 1, Q2 = Apr 1, Q3 = Jul 1, Q4 = Oct 1. Today is {today_iso}.
+
+Examples:
+- "last year" → {{"start": "{last_year_start}", "end": "{last_year_end}"}}
+- "trailing 12 months" / "past 12 months" → {{"start": "{trailing_12_start}", "end": "{today_iso}"}}
+- "all of 2024" / "FY2024" → {{"start": "2024-01-01", "end": "2024-12-31"}}
+- "H1 2025" → {{"start": "2025-01-01", "end": "2025-06-30"}}
+- "last 4 quarters" → {{"start": "{last_4q_start}", "end": "{today_iso}"}}
+- "last 2 quarters" / "couple of quarters" → {{"start": "{last_2q_start}", "end": "{today_iso}"}}
+- "last N quarters" → same pattern: go back N quarters from today's quarter, take the first day of that quarter as start
+- "few years" (≈3) → {{"start": "{y - 3}-01-01", "end": "{today_iso}"}}
+- For comparisons over a range, give ALL companies the SAME date_range.
+  e.g. "Compare ACME and GLOBEX over the last year": [{{"company_ticker": "ACME", "date_expression": null, "date_range": {{"start": "{last_year_start}", "end": "{last_year_end}"}}}}, {{"company_ticker": "GLOBEX", "date_expression": null, "date_range": {{"start": "{last_year_start}", "end": "{last_year_end}"}}}}]
+
+Use only tickers from the list above. Company matching must be fuzzy — match on approximate name, common abbreviations, misspellings, and partial names (e.g. "SrviceNOw", "servicenow", "SRVICENOW", "Service Now" all match NOW: ServiceNow).
+
+IMPORTANT — resolve company AND date from conversation context:
+1. Company: If the query uses pronouns ("their", "them", "it", "they", "the company") without naming a company, resolve using the conversation context.
+2. Date: Only inherit a prior date when the current query is a clear follow-up (uses pronouns, no company named, or phrases like "what about X"). If the query explicitly names a company but mentions no date, use date_expression: null (most recent call) — do NOT inherit a prior date_range.
+   Example: prior query had date_range {{"start": "{last_4q_start}", "end": "{today_iso}"}}, current query "Do they mention ACV?" → follow-up, inherit that date_range.
+   Example: prior query "ServiceNow revenue last 4 quarters", current query "What about their NRR" → follow-up with pronoun, inherit date_range → [{{"company_ticker": "NOW", "date_expression": null, "date_range": {{"start": "{last_4q_start}", "end": "{today_iso}"}}}}]
+   Example: prior query "ServiceNow revenue last 4 quarters", current query "ServiceNow revenue" → explicitly names company, no date → use date_expression: null (most recent only), do NOT inherit the range.
+
+Only return [] if there is truly no company identifiable from either the query or the conversation context.
+
+Reply with only a JSON object: {{ "entities": [ {{ "company_ticker": "<ticker>", "date_expression": "<or null>", "date_range": {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}} or null }}, ... ] }}
 
 User query: {query}"""
     try:
@@ -135,7 +192,7 @@ User query: {query}"""
         ]
         t0 = time.perf_counter()
         response = await client.responses.create(
-            model=_RESOLUTION_MODEL,
+            model=get_settings().openai_model,
             input=input_messages,
             max_output_tokens=_RESOLUTION_MAX_TOKENS,
         )
@@ -164,6 +221,7 @@ User query: {query}"""
         if not isinstance(raw_entities, list):
             return []
         result: list[ResolvedEntity] = []
+        iso_pattern = re.compile(r"\d{4}-\d{2}-\d{2}")
         for item in raw_entities:
             if not isinstance(item, dict):
                 continue
@@ -175,7 +233,17 @@ User query: {query}"""
                 continue
             date_expr = item.get("date_expression")
             date_expr = (date_expr.strip() if isinstance(date_expr, str) and date_expr else None) or None
-            result.append((ticker, date_expr))
+            # Parse date_range if present
+            dr = item.get("date_range")
+            dr_start: str | None = None
+            dr_end: str | None = None
+            if isinstance(dr, dict):
+                s = dr.get("start", "")
+                e = dr.get("end", "")
+                if isinstance(s, str) and isinstance(e, str) and iso_pattern.fullmatch(s.strip()) and iso_pattern.fullmatch(e.strip()):
+                    dr_start, dr_end = s.strip(), e.strip()
+            result.append((ticker, date_expr, dr_start, dr_end))
+        logger.info("[debug] entity resolution: query=%r → raw=%s → result=%s", query, raw_entities, result)
         return result
     except (json.JSONDecodeError, KeyError, IndexError, AttributeError) as e:
         raw_content = (raw or "").strip()[:500]
@@ -190,17 +258,19 @@ User query: {query}"""
         return []
 
 
-def _scope_cache_key(query: str, companies: list[dict[str, str]], today_iso: str) -> tuple:
+def _scope_cache_key(query: str, companies: list[dict[str, str]], today_iso: str, conversation_context: list[str] | None = None) -> tuple:
     """Build cache key for entity resolution scope. Companies key is stable for same ticker/name set."""
     normalized = query.strip().lower()[:500]
     companies_key = tuple(sorted((c.get("ticker", ""), c.get("name", "")) for c in companies))
-    return (normalized, today_iso, companies_key)
+    context_key = tuple((conversation_context or [])[-4:])
+    return (normalized, today_iso, companies_key, context_key)
 
 
 async def resolve_company_and_date(
     query: str,
     companies: list[dict[str, str]],
     today_iso: str,
+    conversation_context: list[str] | None = None,
 ) -> SimpleRAGScope:
     """Resolve scope from LLM list of (entity, date) pairs.
 
@@ -208,61 +278,51 @@ async def resolve_company_and_date(
     Multi-entity: resolve to (ticker, call_date) pairs for OR filter; if none found, use no filter.
     Results are cached (24h TTL) to reduce latency on repeated/similar queries.
     """
-    cache_key = _scope_cache_key(query, companies, today_iso)
+    cache_key = _scope_cache_key(query, companies, today_iso, conversation_context)
     if cache_key in _SCOPE_CACHE:
-        stored = _SCOPE_CACHE[cache_key]
-        return SimpleRAGScope(
-            company_ticker=stored[0],
-            as_of_date=stored[1],
-            resolved_date_pairs=stored[2],
-        )
+        return SimpleRAGScope(resolved_date_pairs=_SCOPE_CACHE[cache_key])
 
     entities: list[ResolvedEntity] = []
     if companies:
-        entities = await _resolve_entities_via_llm(query, companies, today_iso)
+        resolution_query = query
+        if conversation_context:
+            prior = "; ".join(conversation_context)  # all 4 prior queries
+            resolution_query = f"[Prior queries for context: {prior}] Current query: {query}"
+        entities = await _resolve_entities_via_llm(resolution_query, companies, today_iso)
 
-    if len(entities) >= 2:
-        entity_dates = [
-            (ticker, _date_expression_to_iso(date_expr, today_iso) or today_iso)
-            for ticker, date_expr in entities
-        ]
-        t0 = time.perf_counter()
-        resolved_pairs = await resolve_entities_to_call_dates(entity_dates)
-        logger.info("[latency] resolve_entities_to_call_dates: %.3fs", time.perf_counter() - t0)
-        if not resolved_pairs:
-            logger.warning("Multi-entity: no call dates found for entities %s, using no filter", entity_dates)
-        else:
-            logger.info("Simple RAG: %d entities -> multi-entity (single retrieval)", len(entities))
-        scope = SimpleRAGScope(
-            company_ticker=None,
-            as_of_date=None,
-            resolved_date_pairs=resolved_pairs if resolved_pairs else None,
-        )
-        _SCOPE_CACHE[cache_key] = (scope.company_ticker, scope.as_of_date, scope.resolved_date_pairs)
-        return scope
+    if not entities:
+        _SCOPE_CACHE[cache_key] = None
+        return SimpleRAGScope()
 
-    if len(entities) == 1:
-        ticker, date_expression = entities[0]
-        as_of_date: str | None = None
-        if date_expression is not None:
-            resolved = _date_expression_to_iso(date_expression, today_iso)
-            if resolved is not None:
-                as_of_date = resolved
-        if not as_of_date:
-            as_of_date = today_iso
-        scope = SimpleRAGScope(
-            company_ticker=ticker,
-            as_of_date=as_of_date or today_iso,
-        )
-        _SCOPE_CACHE[cache_key] = (scope.company_ticker, scope.as_of_date, scope.resolved_date_pairs)
-        return scope
+    # Separate range entities (multi-quarter windows) from point entities (single call)
+    range_entities = [(ticker, dr_start, dr_end) for ticker, _, dr_start, dr_end in entities if dr_start and dr_end]
+    point_entities = [
+        (ticker, _date_expression_to_iso(date_expr, today_iso) or today_iso)
+        for ticker, date_expr, dr_start, _ in entities
+        if not dr_start
+    ]
 
-    scope = SimpleRAGScope(
-        company_ticker=None,
-        as_of_date=today_iso,
-    )
-    _SCOPE_CACHE[cache_key] = (scope.company_ticker, scope.as_of_date, scope.resolved_date_pairs)
-    return scope
+    resolved_pairs: list[tuple[str, str]] = []
+
+    coros = []
+    if range_entities:
+        coros.append(resolve_entities_to_call_dates_in_ranges(range_entities))
+    if point_entities:
+        coros.append(resolve_entities_to_call_dates(point_entities))
+
+    t0 = time.perf_counter()
+    results = await asyncio.gather(*coros)
+    logger.info("[latency] resolve call dates (parallel): %.3fs", time.perf_counter() - t0)
+    for r in results:
+        resolved_pairs.extend(r)
+
+    if not resolved_pairs:
+        logger.warning("Entity resolution: no call dates found for %s, using no filter", entities)
+
+    logger.info("Simple RAG: %d entities → %d resolved pairs", len(entities), len(resolved_pairs))
+    pairs = resolved_pairs or None
+    _SCOPE_CACHE[cache_key] = pairs
+    return SimpleRAGScope(resolved_date_pairs=pairs)
 
 
 def _format_context_for_prompt(chunks: list[dict[str, Any]]) -> str:

@@ -96,49 +96,6 @@ def _rrf_merge(
     return [(cid, best_orig[cid]) for cid in merged]
 
 
-async def _resolve_as_of_date(
-    as_of_date: str,
-    company_ticker: str | None = None,
-) -> list[tuple[str, str]]:
-    """Resolve an as-of date to the latest call_date per company on or before that date.
-
-    Because companies have different fiscal-year calendars, we normalise temporal
-    queries by actual earnings-call date rather than fiscal quarter labels.
-    Results are cached (24h TTL) to reduce DB latency on repeated queries.
-
-    Returns:
-        List of (company_ticker, call_date) pairs — one per company that has at
-        least one call on or before *as_of_date*.
-    """
-    cache_key = (as_of_date, company_ticker or "", use_eval_chunks())
-    if cache_key in _DATE_RESOLUTION_CACHE:
-        return _DATE_RESOLUTION_CACHE[cache_key]
-
-    Chunk = _get_chunk_model()
-
-    stmt = (
-        select(
-            Chunk.company_ticker.label("company_ticker"),
-            func.max(Chunk.call_date).label("call_date"),
-        )
-        .where(Chunk.call_date.isnot(None))
-        .where(Chunk.call_date <= as_of_date)
-        .group_by(Chunk.company_ticker)
-    )
-    if company_ticker:
-        stmt = stmt.where(Chunk.company_ticker == company_ticker)
-
-    async with get_session() as session:
-        result = await session.execute(stmt)
-        rows = result.mappings().all()
-
-    resolved = [(row["company_ticker"], row["call_date"]) for row in rows]
-    _DATE_RESOLUTION_CACHE[cache_key] = resolved
-    logger.info(
-        f"Resolved as_of_date={as_of_date} (ticker={company_ticker}) → {resolved}"
-    )
-    return resolved
-
 
 async def _resolve_entity_dates_batch(
     entity_dates: list[tuple[str, str]],
@@ -218,34 +175,59 @@ async def resolve_entities_to_call_dates(
     return await _resolve_entity_dates_batch(entity_dates)
 
 
-async def _build_resolved_filters(
-    filter_metadata: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    """Pre-process filter_metadata: resolve ``as_of_date`` into concrete call_date pairs.
+async def resolve_entities_to_call_dates_in_ranges(
+    entity_ranges: list[tuple[str, str, str]],
+) -> list[tuple[str, str]]:
+    """Return all distinct (ticker, call_date) pairs where call_date falls within [start, end].
 
-    Returns a *new* dict (never mutates the input).
+    Used for range queries like "last year" or "past 4 quarters" so every quarterly
+    earnings call in the window is retrieved, not just the most recent one.
+
+    Args:
+        entity_ranges: List of (company_ticker, start_iso, end_iso).
+
+    Returns:
+        List of (company_ticker, call_date) pairs — potentially multiple per ticker.
     """
-    if not filter_metadata or "as_of_date" not in filter_metadata:
-        return filter_metadata
+    if not entity_ranges:
+        return []
 
-    filters = dict(filter_metadata)
-    as_of_date = str(filters.pop("as_of_date"))
-    company_ticker = filters.get("company_ticker")
+    Chunk = _get_chunk_model()
+    conditions = [
+        and_(
+            Chunk.company_ticker == ticker,
+            Chunk.call_date >= start_iso,
+            Chunk.call_date <= end_iso,
+            Chunk.call_date.isnot(None),
+        )
+        for ticker, start_iso, end_iso in entity_ranges
+    ]
 
-    resolved = await _resolve_as_of_date(as_of_date, company_ticker)
-    if not resolved:
-        filters["call_date"] = "__no_match__"
-        return filters
+    stmt = (
+        select(Chunk.company_ticker, Chunk.call_date)
+        .where(or_(*conditions))
+        .distinct()
+        .order_by(Chunk.company_ticker, Chunk.call_date)
+    )
 
-    filters["_resolved_date_pairs"] = resolved
-    return filters
+    t0 = time.perf_counter()
+    async with get_session() as session:
+        result = await session.execute(stmt)
+        rows = result.all()
+    logger.info(
+        "[latency] resolve_entities_to_call_dates_in_ranges: %.3fs (%d ranges → %d pairs)",
+        time.perf_counter() - t0,
+        len(entity_ranges),
+        len(rows),
+    )
+    return [(row[0], row[1]) for row in rows]
+
 
 
 def _apply_metadata_filters(stmt, filter_metadata: dict[str, Any] | None, chunk_model=None):
     """Apply JSONB metadata filters to a SQLAlchemy select statement.
 
-    Handles the special ``_resolved_date_pairs`` key produced by
-    ``_build_resolved_filters`` (from an ``as_of_date`` input).
+    Handles the special ``_resolved_date_pairs`` key (list of (ticker, call_date) pairs).
     """
     Chunk = chunk_model or _get_chunk_model()
     if not filter_metadata:
@@ -452,11 +434,6 @@ async def retrieve_relevant_chunks(
     top_k = top_k or settings.retrieval_top_k
     threshold = threshold if threshold is not None else settings.retrieval_threshold
 
-    # Resolve as_of_date (if present) into concrete call_date filters.
-    t0 = time.perf_counter()
-    filter_metadata = await _build_resolved_filters(filter_metadata)
-    logger.info("[latency] _build_resolved_filters: %.3fs", time.perf_counter() - t0)
-
     try:
         if search_mode == "vector":
             chunks = await _retrieve_vector(
@@ -576,8 +553,6 @@ async def list_available_transcripts(
 # On multi-instance deployments, each process has its own cache; no distributed cache.
 _COMPANIES_CACHE: TTLCache = TTLCache(maxsize=2, ttl=86400)  # 24 hours
 
-# Date resolution caches (24h TTL) to avoid repeated DB round-trips for same date/ticker.
-_DATE_RESOLUTION_CACHE: TTLCache = TTLCache(maxsize=500, ttl=86400)
 _BATCH_DATE_RESOLUTION_CACHE: TTLCache = TTLCache(maxsize=500, ttl=86400)
 
 

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import time
+from collections import deque
 from datetime import date
 from typing import Any
 
@@ -27,6 +28,26 @@ from app.rag.retriever import (
 )
 
 logger = logging.getLogger(__name__)
+
+# In-memory fallback: session_id → deque of recent user query strings (last 3).
+# Written synchronously before fire-and-forget so the next query always sees prior context
+# even if DB persistence hasn't completed yet.
+_SESSION_RECENT_QUERIES: dict[str, deque[str]] = {}
+_SESSION_RECENT_QUERIES_LIMIT = 4
+
+_GREETING_RE = re.compile(
+    r"^\s*(hey|hi+|hello|howdy|good\s+(morning|afternoon|evening)|what'?s\s+up|sup|yo|hiya|greetings|howzit)\s*[!?.,]?\s*$",
+    re.IGNORECASE,
+)
+_GREETING_RESPONSE = (
+    "Hi! I'm an earnings call analyst. Ask me anything about company earnings, revenue, "
+    "guidance, or financial performance — for a specific company or across multiple companies. "
+    "What would you like to know?"
+)
+
+
+def _is_greeting(query: str) -> bool:
+    return bool(_GREETING_RE.match(query.strip()))
 
 
 async def _append_conversation_turn_background(
@@ -77,28 +98,27 @@ async def _prepare_simple_rag(
     companies = companies or []
     logger.info("[latency] get_known_companies + get_conversation_history: %.3fs", time.perf_counter() - t0)
 
-    conversation_context = (
-        get_recent_user_queries(message_history, limit=3) if message_history else None
-    )
+    db_queries = get_recent_user_queries(message_history, limit=4) if message_history else []
+    # Merge with in-memory buffer to handle the fire-and-forget timing race:
+    # the prior turn may not be in DB yet when this request arrives.
+    mem_queries = list(_SESSION_RECENT_QUERIES.get(session_id, [])) if session_id else []
+    merged = db_queries[:]
+    for q in mem_queries:
+        if q not in merged:
+            merged.append(q)
+    conversation_context = merged[-4:] if merged else None
+    logger.info("[debug] conversation_context: %s", conversation_context)
     search_query = _build_search_query(query, conversation_context)
 
     # Run entity resolution and embedding in parallel to reduce latency
     t0 = time.perf_counter()
     scope, query_embedding = await asyncio.gather(
-        resolve_company_and_date(query=query, companies=companies, today_iso=today_iso),
+        resolve_company_and_date(query=query, companies=companies, today_iso=today_iso, conversation_context=conversation_context),
         generate_embedding(search_query),
     )
     logger.info("[latency] resolve_company_and_date + generate_embedding (parallel): %.3fs", time.perf_counter() - t0)
 
-    filter_metadata: dict[str, Any] = {}
-    if scope.resolved_date_pairs:
-        filter_metadata["_resolved_date_pairs"] = scope.resolved_date_pairs
-    else:
-        if scope.company_ticker:
-            filter_metadata["company_ticker"] = scope.company_ticker
-        if scope.as_of_date:
-            filter_metadata["as_of_date"] = scope.as_of_date
-    filter_metadata = filter_metadata or None
+    filter_metadata = {"_resolved_date_pairs": scope.resolved_date_pairs} if scope.resolved_date_pairs else None
 
     top_k = settings.retrieval_top_k
     if scope.resolved_date_pairs:
@@ -135,53 +155,38 @@ async def _prepare_simple_rag(
     return chunks, full_prompt, today_iso
 
 
-def _normalize_ws(text: str) -> str:
-    """Collapse whitespace for matching."""
-    return re.sub(r"\s+", " ", text).strip()
+_SOURCE_REF_RE = re.compile(r"\[Source\s+(\d+)\]", re.IGNORECASE)
 
 
-def _compute_cited_spans(answer: str, source_content: str) -> list[dict[str, int]]:
-    """Find substrings from the answer that appear in source content; return merged spans as {start, end}."""
-    if not answer or not source_content:
-        return []
-    spans: list[tuple[int, int]] = []
-    # Extract phrases: quoted strings, sentences, and word n-grams (15–100 chars)
-    phrases: list[str] = []
-    for quoted in re.findall(r'"([^"]{15,})"', answer):
-        phrases.append(_normalize_ws(quoted))
-    for sent in re.split(r"[.!?]\s+", answer):
-        s = _normalize_ws(sent)
-        if 15 <= len(s) <= 200:
-            phrases.append(s)
-    words = answer.split()
-    for i in range(len(words)):
-        for j in range(i + 3, min(i + 12, len(words) + 1)):
-            chunk = _normalize_ws(" ".join(words[i:j]))
-            if 15 <= len(chunk) <= 100:
-                phrases.append(chunk)
-    seen: set[str] = set()
-    for p in phrases:
-        if not p or p in seen:
-            continue
-        seen.add(p)
-        pos = 0
-        while True:
-            idx = source_content.find(p, pos)
-            if idx == -1:
-                break
-            spans.append((idx, idx + len(p)))
-            pos = idx + 1
-    if not spans:
-        return []
-    spans.sort()
-    merged: list[tuple[int, int]] = [spans[0]]
-    for s, e in spans[1:]:
-        ls, le = merged[-1]
-        if s <= le:
-            merged[-1] = (ls, max(le, e))
-        else:
-            merged.append((s, e))
-    return [{"start": s, "end": e} for s, e in merged]
+def _parse_cited_source_indices(answer: str) -> set[int]:
+    """Parse [Source N] markers from the answer; returns set of 1-based indices."""
+    return {int(m.group(1)) for m in _SOURCE_REF_RE.finditer(answer)}
+
+
+def _build_sources(
+    chunks: list[dict[str, Any]], cited_indices: set[int]
+) -> list[dict[str, Any]]:
+    """Return source dicts filtered to cited chunks. Falls back to all chunks if none cited."""
+    use_all = not cited_indices
+    return [
+        {
+            "chunk_id": c["chunk_id"],
+            "content": c.get("content", ""),
+            "similarity": c.get("similarity", 0.0),
+            "metadata": c.get("metadata", {}),
+            "cited_spans": [],
+        }
+        for i, c in enumerate(chunks, 1)
+        if use_all or i in cited_indices
+    ]
+
+
+def _confidence_from_chunks(chunks: list[dict[str, Any]], cited_indices: set[int]) -> float:
+    """Mean similarity of cited chunks; falls back to all chunks if none cited."""
+    relevant = [c for i, c in enumerate(chunks, 1) if not cited_indices or i in cited_indices]
+    if not relevant:
+        return 0.0
+    return round(sum(c.get("similarity", 0.0) for c in relevant) / len(relevant), 3)
 
 
 async def run_simple_rag(
@@ -220,18 +225,20 @@ async def run_simple_rag(
         logger.exception("Simple RAG completion failed: %s", e)
         answer = "[Error while generating response.]"
 
+    cited_indices = _parse_cited_source_indices(answer)
     sources = [
         SourceDocument(
             chunk_id=c["chunk_id"],
-            content=c["content"],
+            content=c.get("content", ""),
             similarity=c.get("similarity", 0.0),
             metadata=c.get("metadata", {}),
         )
-        for c in chunks
+        for i, c in enumerate(chunks, 1)
+        if not cited_indices or i in cited_indices
     ]
     return AgentResponse(
         answer=answer,
-        confidence=0.9,
+        confidence=_confidence_from_chunks(chunks, cited_indices),
         sources=sources,
         citations=[],
         reasoning=None,
@@ -247,6 +254,24 @@ async def stream_simple_rag_or_agent(
     user_id: str | None = None,
 ):
     """Async generator: yields ('delta', text) for token chunks, then ('done', payload dict)."""
+    if _is_greeting(query):
+        if session_id:
+            buf = _SESSION_RECENT_QUERIES.setdefault(session_id, deque(maxlen=_SESSION_RECENT_QUERIES_LIMIT))
+            buf.append(query)
+            asyncio.create_task(
+                _append_conversation_turn_background(session_id, query, _GREETING_RESPONSE, user_id=user_id)
+            )
+        yield "delta", _GREETING_RESPONSE
+        yield "done", {
+            "answer": _GREETING_RESPONSE,
+            "confidence": 1.0,
+            "sources": [],
+            "citations": [],
+            "reasoning": None,
+            "tool_calls_made": [],
+        }
+        return
+
     t_prepare = time.perf_counter()
     chunks, full_prompt, _ = await _prepare_simple_rag(
         query=query,
@@ -300,27 +325,21 @@ async def stream_simple_rag_or_agent(
         )
 
     answer = "".join(accumulated)
-    sources = []
-    for c in chunks:
-        content = c.get("content", "")
-        raw_spans = _compute_cited_spans(answer, content)
-        sources.append({
-            "chunk_id": c["chunk_id"],
-            "content": content,
-            "similarity": c.get("similarity", 0.0),
-            "metadata": c.get("metadata", {}),
-            "cited_spans": [{"start": s["start"], "end": s["end"]} for s in raw_spans],
-        })
+    cited_indices = _parse_cited_source_indices(answer)
+    sources = _build_sources(chunks, cited_indices)
     if session_id:
+        # Update in-memory buffer synchronously so the next query sees this turn immediately,
+        # regardless of when the async DB write completes.
+        buf = _SESSION_RECENT_QUERIES.setdefault(session_id, deque(maxlen=_SESSION_RECENT_QUERIES_LIMIT))
+        buf.append(query)
         asyncio.create_task(
             _append_conversation_turn_background(session_id, query, answer, user_id=user_id)
         )
-    payload = {
+    yield "done", {
         "answer": answer,
-        "confidence": 0.9,
+        "confidence": _confidence_from_chunks(chunks, cited_indices),
         "sources": sources,
         "citations": [],
         "reasoning": None,
         "tool_calls_made": [],
     }
-    yield "done", payload

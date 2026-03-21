@@ -12,6 +12,7 @@ load_dotenv(_backend / ".env")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 
 from app.agents.router import router as agent_router
 from app.auth.router import router as auth_router
@@ -62,6 +63,26 @@ app.include_router(agent_router)
 app.include_router(conversations_router)
 app.include_router(rag_router)
 app.include_router(evals_router)
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "AdminKey": {"type": "apiKey", "in": "header", "name": "X-Admin-Key"}
+    }
+    schema["security"] = [{"AdminKey": []}]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = custom_openapi
 
 
 @app.get("/health")

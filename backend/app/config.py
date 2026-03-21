@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     # OpenAI (gpt-4.1-nano is fastest; set OPENAI_MODEL=gpt-4o-mini for higher quality)
     openai_api_key: str
-    openai_model: str = "gpt-4.1-nano"
+    openai_model: str = "gpt-4.1-mini"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 64
     retrieval_top_k: int = 5
-    retrieval_threshold: float = 0.35  # Lowered from 0.5 to return more chunks; 0 = no filter
+    retrieval_threshold: float = 0.4  # Lowered from 0.5 to return more chunks; 0 = no filter
     default_search_mode: str = "hybrid"
 
     # Agent
