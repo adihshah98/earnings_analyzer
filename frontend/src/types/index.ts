@@ -19,11 +19,12 @@ export interface SourceDocument {
   metadata: Record<string, unknown>
   /** Character ranges in content that were cited in the answer (for highlighting). */
   cited_spans?: CitedSpan[]
+  /** 1-based index matching [Source N] in the answer text. */
+  source_index?: number
 }
 
 export interface AgentResponse {
   answer: string
-  confidence: number
   sources: SourceDocument[]
   reasoning?: string | null
   tool_calls_made: string[]
@@ -52,7 +53,6 @@ export interface ChatMessage {
   content: string
   createdAt: string
   sources?: SourceDocument[]
-  confidence?: number
 }
 
 export interface ChatSession {

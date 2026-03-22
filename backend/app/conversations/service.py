@@ -205,6 +205,39 @@ async def get_conversation_history_for_api(
     return entries
 
 
+def get_recent_turns(messages: list[ModelMessage], limit: int = 5) -> list[tuple[str, str]]:
+    """Extract recent (user_query, assistant_answer) pairs from conversation history.
+
+    Returns:
+        List of (query, answer) tuples, most recent last.
+    """
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+
+    pairs: list[tuple[str, str]] = []
+    msgs = list(messages)
+    i = 0
+    while i < len(msgs):
+        msg = msgs[i]
+        if isinstance(msg, ModelRequest):
+            query = " ".join(
+                p.content for p in msg.parts
+                if isinstance(p, UserPromptPart) and isinstance(p.content, str)
+            ).strip()
+            answer = ""
+            if i + 1 < len(msgs) and isinstance(msgs[i + 1], ModelResponse):
+                answer = " ".join(
+                    p.content for p in msgs[i + 1].parts if isinstance(p, TextPart)
+                ).strip()
+                i += 2
+            else:
+                i += 1
+            if query:
+                pairs.append((query, answer))
+        else:
+            i += 1
+    return pairs[-limit:]
+
+
 def get_recent_user_queries(messages: list[ModelMessage], limit: int = 5) -> list[str]:
     """Extract recent user queries from conversation history for RAG context.
 

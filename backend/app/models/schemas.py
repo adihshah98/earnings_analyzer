@@ -52,6 +52,10 @@ class SourceDocument(BaseModel):
         default_factory=list,
         description="Character ranges in content that were cited in the answer (for highlighting).",
     )
+    source_index: int | None = Field(
+        default=None,
+        description="1-based index matching [Source N] citations in the answer text.",
+    )
 
 
 class Citation(BaseModel):
@@ -63,12 +67,6 @@ class Citation(BaseModel):
 class AgentResponse(BaseModel):
     """Structured response from the KB agent."""
     answer: str = Field(..., description="The agent's answer to the query")
-    confidence: float = Field(
-        ...,
-        description="Confidence score from 0.0 to 1.0",
-        ge=0.0,
-        le=1.0,
-    )
     sources: list[SourceDocument] = []
     citations: list[Citation] = Field(
         default_factory=list,

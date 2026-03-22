@@ -517,13 +517,6 @@ button {
   color: #8a857e;
 }
 
-.confidence-pill {
-  border-radius: 4px;
-  padding: 3px 8px;
-  background: #e8e4df;
-  color: #6b6560;
-  font-size: 11px;
-}
 
 .view-sources-button {
   font-size: 11px;

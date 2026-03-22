@@ -32,6 +32,9 @@ backend/eval_results/
 # Transcripts (user data)
 backend/transcripts/
 
+# Precomputed chunks (large JSON with embeddings)
+backend/chunks/
+
 # Build / dist
 dist/
 build/

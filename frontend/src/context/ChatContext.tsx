@@ -223,7 +223,6 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
                         ...msg,
                         content: res.answer,
                         sources: res.sources,
-                        confidence: res.confidence,
                       }
                     : msg,
                 ),

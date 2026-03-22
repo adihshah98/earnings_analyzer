@@ -16,7 +16,7 @@ from app.models.schemas import (
     SourceDocument,
 )
 from app.rag.ingestion import ingest_document
-from app.rag.retriever import _COMPANIES_CACHE, get_transcript_by_chunk_id, retrieve_by_doc_id, retrieve_relevant_chunks
+from app.rag.retriever import _COMPANIES_CACHE, _PERIODS_CACHE, get_transcript_by_chunk_id, retrieve_by_doc_id, retrieve_relevant_chunks
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/rag", tags=["rag"])
@@ -52,6 +52,7 @@ async def ingest_manual_upload(
     company_ticker: str | None = Form(None, description="Company ticker (e.g. AAPL). Required."),
     call_date: str | None = Form(None, description="Date of the call, YYYY-MM-DD. Required."),
     title: str | None = Form(None, description="Optional title; if omitted, generated from ticker and date."),
+    company_name: str | None = Form(None, description="Human-readable company name (e.g. 'Palo Alto Networks'). Optional."),
     use_eval_table: bool = Form(False, description="If true, ingest into eval_document_chunks (for eval transcripts)."),
 ) -> IngestResult:
     """Upload a Word (.docx) transcript. Text is extracted automatically.
@@ -124,11 +125,12 @@ async def ingest_manual_upload(
         source="transcript",
         company_ticker=ticker,
         call_date=call_date_parsed,
-        metadata={"data_source": "manual_upload", "original_filename": file.filename or ""},
+        metadata={"data_source": "manual_upload", "original_filename": file.filename or "", **({"company_name": company_name.strip()} if company_name and company_name.strip() else {})},
         use_transcript_chunking=True,
         use_eval_table=use_eval_table,
     )
     _COMPANIES_CACHE.clear()
+    _PERIODS_CACHE.clear()
     return IngestResult(**result)
 
 

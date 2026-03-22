@@ -1,41 +1,34 @@
 """Simple RAG: single retrieval + one LLM call (no agentic tool loop).
 
-Entity (company) and date are resolved via a cheap LLM call returning a list of
-(entity, date) pairs. All queries use this path.
+Entity resolution maps natural language → (tickers, temporal scope) via a cheap LLM call.
+Temporal resolution then maps the temporal intent to specific (ticker, call_date) pairs
+using a deterministic lookup against cached available periods.
+Query rewriting expands the query into 2-3 retrieval variants (actual vs guidance,
+metric aliases) so retrieval covers different interpretations in one pass.
 """
 
 import asyncio
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
+import tiktoken
 from cachetools import TTLCache
 
+from app.agents.prompt_utils import _sanitize_for_prompt
 from app.config import get_settings
-from app.conversations.service import get_recent_user_queries
 from app.rag.embeddings import get_openai_client
-from app.rag.retriever import (
-    resolve_entities_to_call_dates,
-    resolve_entities_to_call_dates_in_ranges,
-    retrieve_relevant_chunks,
-)
+from app.rag.fiscal_calendar import compute_cy_quarter_end, period_end_to_label
+
+_tokenizer = tiktoken.encoding_for_model("gpt-4o-mini")
 
 logger = logging.getLogger(__name__)
 
-# Entity resolution scope cache (24h TTL). Key: (query_normalized, today_iso, companies_key).
+# Scope resolution cache (24h TTL). Key: (normalized_query, companies_key, context_key).
 _SCOPE_CACHE: TTLCache = TTLCache(maxsize=500, ttl=86400)
-
-# Quarter end dates (approximate): Q1 -> Mar 31, Q2 -> Jun 30, Q3 -> Sep 30, Q4 -> Dec 31
-_QUARTER_END = {"1": "03-31", "2": "06-30", "3": "09-30", "4": "12-31"}
-
-_RESOLUTION_MAX_TOKENS = 300  # increased to handle date_range objects
-
-# (company_ticker, date_expression, date_range_start, date_range_end)
-# date_range_start/end are ISO strings for range queries; date_expression for single-period queries.
-ResolvedEntity = tuple[str, str | None, str | None, str | None]
 
 
 def _extract_text_from_responses_output(output: list) -> str:
@@ -50,153 +43,112 @@ def _extract_text_from_responses_output(output: list) -> str:
 
 
 @dataclass
+class TemporalIntent:
+    """What the user meant temporally, as extracted by the LLM."""
+    type: str = "unspecified"  # "latest" | "specific_quarter" | "range" | "unspecified"
+    quarter: int | None = None       # 1-4 (for specific_quarter)
+    year: int | None = None          # e.g. 2025
+    num_quarters: int | None = None  # for range queries
+
+
+@dataclass
 class SimpleRAGScope:
-    """Resolved scope for retrieval.
-
-    Always expressed as pre-resolved (ticker, call_date) pairs so the retriever uses
-    a single OR-filter regardless of how many companies or time periods are involved.
-    None means no filter (full-corpus search).
-    """
-
-    resolved_date_pairs: list[tuple[str, str]] | None = None
+    """Resolved scope for retrieval."""
+    tickers: list[str] | None = None
+    # Resolved (ticker, call_date) pairs for temporal filtering. When set,
+    # retrieval is scoped to these exact pairs (more specific than tickers alone).
+    ticker_date_pairs: list[tuple[str, str]] | None = None
+    temporal_intent: TemporalIntent | None = None
 
 
-def _date_expression_to_iso(date_expression: str | None, today_iso: str) -> str | None:
-    """Map LLM date_expression to ISO date. Returns None if unparseable."""
-    if not date_expression or not date_expression.strip():
-        return None
-    expr = date_expression.strip().lower()
-    # Already YYYY-MM-DD
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", expr):
-        return expr
-    # last_quarter, current_quarter
-    try:
-        y, m, d = map(int, today_iso.split("-"))
-        if expr in ("last_quarter", "previous_quarter", "prior_quarter"):
-            # Previous quarter end: if we're in Q1 (Jan–Mar) -> last year Q4; else same year
-            if m <= 3:
-                return f"{y - 1}-12-31"
-            if m <= 6:
-                return f"{y}-03-31"
-            if m <= 9:
-                return f"{y}-06-30"
-            return f"{y}-09-30"
-        if expr in ("current_quarter", "this_quarter"):
-            if m <= 3:
-                return f"{y}-03-31"
-            if m <= 6:
-                return f"{y}-06-30"
-            if m <= 9:
-                return f"{y}-09-30"
-            return f"{y}-12-31"
-    except (ValueError, AttributeError):
-        pass
-    # Q1 2024, Q2 2023
-    q_match = re.search(r"q([1-4])\s*['\"]?\s*(\d{4})", expr, re.IGNORECASE)
-    if q_match:
-        q, year = q_match.group(1), q_match.group(2)
-        return f"{year}-{_QUARTER_END.get(q, '12-31')}"
-    return None
-
-
-async def _resolve_entities_via_llm(
+def _scope_cache_key(
     query: str,
     companies: list[dict[str, str]],
-    today_iso: str,
-) -> list[ResolvedEntity]:
-    """Call a cheap fast LLM to extract a list of (company_ticker, date_expression) pairs.
+    conversation_context: list[str] | None = None,
+) -> tuple:
+    normalized = query.strip().lower()[:500]
+    companies_key = tuple(sorted((c.get("ticker", ""), c.get("name", "")) for c in companies))
+    context_key = tuple((conversation_context or [])[-5:])
+    return (normalized, companies_key, context_key)
 
-    Returns a list of (ticker, date_expression) for each entity the user is asking about.
-    Single-entity queries return one element; multi-entity/comparison return multiple.
-    Only tickers from the given companies list are included. date_expression is mapped to ISO later.
+
+def _strip_json_fences(text: str) -> str:
+    """Remove markdown code fences from LLM JSON output."""
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.lstrip().lower().startswith("json"):
+            text = text.lstrip()[4:]
+        text = text.strip()
+    return text
+
+
+async def _resolve_scope_via_llm(
+    query: str,
+    companies: list[dict[str, str]],
+    conversation_context: list[str] | None = None,
+) -> tuple[list[str], TemporalIntent]:
+    """Extract company tickers AND temporal scope from query using a cheap LLM call.
+
+    Returns (tickers, temporal_intent).
     """
     if not companies:
-        return []
+        return [], TemporalIntent()
+
     valid_tickers = {c.get("ticker", "").upper() for c in companies if c.get("ticker")}
-    company_list = ", ".join(f"{c.get('ticker', '').upper()}: {c.get('name', '')}" for c in companies if c.get("ticker"))
-    # Precompute range helpers for the prompt
-    try:
-        y, m, _ = map(int, today_iso.split("-"))
-        last_year_start = f"{y - 1}-01-01"
-        last_year_end = f"{y - 1}-12-31"
-        # Trailing 12 months start
-        trailing_start_y, trailing_start_m = (y - 1, m) if m > 1 else (y - 2, 12)
-        trailing_12_start = f"{trailing_start_y}-{trailing_start_m:02d}-01"
-        # Last N quarters: start = first day of quarter N quarters before current quarter
-        def _quarter_start_n_ago(n: int) -> str:
-            current_q = (m - 1) // 3  # 0=Q1,1=Q2,2=Q3,3=Q4
-            total_q = y * 4 + current_q - n
-            qy, qq = total_q // 4, total_q % 4
-            return f"{qy}-{qq * 3 + 1:02d}-01"
-        last_4q_start = _quarter_start_n_ago(4)
-        last_2q_start = _quarter_start_n_ago(2)
-    except (ValueError, AttributeError):
-        last_year_start, last_year_end, trailing_12_start = f"{today_iso[:4]}-01-01", f"{today_iso[:4]}-12-31", today_iso
-        last_4q_start = last_2q_start = f"{today_iso[:4]}-01-01"
+    company_list = ", ".join(
+        f"{c.get('ticker', '').upper()}: {c.get('name', '')}" for c in companies if c.get("ticker")
+    )
+    sanitized_query = _sanitize_for_prompt(query, max_len=500)
+    resolution_query = sanitized_query
+    if conversation_context:
+        prior = "; ".join(_sanitize_for_prompt(c, max_len=300) for c in conversation_context)
+        resolution_query = f"[Prior context: {prior}] Current query: {sanitized_query}"
 
-    prompt = f"""Today's date is {today_iso}.
+    prompt = f"""Available companies (ticker: name): {company_list}
 
-Available companies (ticker: name): {company_list}
+From the user query and conversation context, extract:
+1. Company tickers being asked about
+2. Temporal scope (which time period)
 
-From the user query, extract a list of company/date entities the user is asking about.
-Each object has: "company_ticker", and EITHER "date_expression" (single period) OR "date_range" (multi-period).
+TICKERS:
+- Use conversation context: follow-ups reference prior companies ("what about their Q2?" → prior company)
+- Fuzzy match: "ServieNow" → NOW, "amazon" → AMZN
+- If ambiguous with multiple prior companies, default to the most recently mentioned
+- Return [] only if genuinely no company is identifiable
 
-SINGLE-PERIOD rules (use "date_expression", set "date_range": null):
-- Single company / single period: [{{"company_ticker": "ACME", "date_expression": "last_quarter", "date_range": null}}]
-- Comparing multiple companies for same period: [{{"company_ticker": "ACME", "date_expression": "last_quarter", "date_range": null}}, {{"company_ticker": "GLOBEX", "date_expression": "last_quarter", "date_range": null}}]
-- Same company, two specific periods (QoQ, YoY): [{{"company_ticker": "NOW", "date_expression": "last_quarter", "date_range": null}}, {{"company_ticker": "NOW", "date_expression": "current_quarter", "date_range": null}}]
-- date_expression values: YYYY-MM-DD, "Q1 2024" style, "last_quarter", "current_quarter", or null for latest (most recent call only).
-- DEFAULT (no date mentioned, no prior date context): use date_expression: null — this returns only the MOST RECENT call. NEVER default to a date_range just because no date is specified.
+TEMPORAL SCOPE — classify as one of:
+- "latest": user wants the most recent quarter. This is the DEFAULT when no time period is mentioned but a financial metric is asked AND no prior conversation established a specific time period (e.g. "Samsara revenue" with no prior context → latest).
+- "specific_quarter": user references a specific quarter, e.g. "Q1 25", "Q4 FY2025", "Q3 2024"
+- "range": user wants multiple quarters, e.g. "last 8 quarters", "over the past 2 years", "revenue trend"
+- "unspecified": genuinely no temporal reference AND not a specific metrics question (e.g. "tell me about Samsara", "what companies are available")
 
-MULTI-PERIOD rules (use "date_range", set "date_expression": null) — use when the query spans multiple quarters or years.
-Trigger this for ANY expression implying more than one period: exact counts ("last 4 quarters"), vague counts ("few quarters", "couple of quarters", "several years", "a few years"), named periods ("last year", "FY2024", "H1 2025"), or open-ended ("over time", "historically", "trailing 12 months").
-Vague quantity defaults: "couple" = 2, "few" = 3, "several" = 5.
-Quarter boundaries: Q1 = Jan 1, Q2 = Apr 1, Q3 = Jul 1, Q4 = Oct 1. Today is {today_iso}.
+TEMPORAL CARRYOVER: If the user's follow-up asks about a financial metric without specifying a time period, AND the prior conversation established a specific time period (e.g. "Q4 25"), carry that time period forward — do NOT default to "latest". Examples:
+- Prior: "ServiceNow Q4 25 revenue" → Follow-up: "what about their margins?" → carry forward specific_quarter Q4 2025
+- Prior: "Samsara last 8 quarters revenue" → Follow-up: "and their gross margin?" → carry forward range num_quarters=8
+- Prior: "tell me about Samsara" → Follow-up: "what's their revenue?" → no prior time period, use "latest"
 
-Examples:
-- "last year" → {{"start": "{last_year_start}", "end": "{last_year_end}"}}
-- "trailing 12 months" / "past 12 months" → {{"start": "{trailing_12_start}", "end": "{today_iso}"}}
-- "all of 2024" / "FY2024" → {{"start": "2024-01-01", "end": "2024-12-31"}}
-- "H1 2025" → {{"start": "2025-01-01", "end": "2025-06-30"}}
-- "last 4 quarters" → {{"start": "{last_4q_start}", "end": "{today_iso}"}}
-- "last 2 quarters" / "couple of quarters" → {{"start": "{last_2q_start}", "end": "{today_iso}"}}
-- "last N quarters" → same pattern: go back N quarters from today's quarter, take the first day of that quarter as start
-- "few years" (≈3) → {{"start": "{y - 3}-01-01", "end": "{today_iso}"}}
-- For comparisons over a range, give ALL companies the SAME date_range.
-  e.g. "Compare ACME and GLOBEX over the last year": [{{"company_ticker": "ACME", "date_expression": null, "date_range": {{"start": "{last_year_start}", "end": "{last_year_end}"}}}}, {{"company_ticker": "GLOBEX", "date_expression": null, "date_range": {{"start": "{last_year_start}", "end": "{last_year_end}"}}}}]
+For specific_quarter:
+- Extract quarter (1-4) and year (4-digit)
+- Always interpret as calendar year — "Q1 25", "Q1 FY25", "Q1 CY25" all mean CY Q1 2025 (Jan–Mar 2025)
+For range:
+- Extract num_quarters (e.g. 8 for "last 8 quarters", 4 for "last year", 20 for "last 5 years")
 
-Use only tickers from the list above. Company matching must be fuzzy — match on approximate name, common abbreviations, misspellings, and partial names (e.g. "SrviceNOw", "servicenow", "SRVICENOW", "Service Now" all match NOW: ServiceNow).
+Reply with only JSON:
+{{"tickers": ["TICKER1"], "temporal": {{"type": "latest"}}}}
+{{"tickers": ["NOW", "CRM"], "temporal": {{"type": "specific_quarter", "quarter": 4, "year": 2025}}}}
+{{"tickers": ["NOW"], "temporal": {{"type": "range", "num_quarters": 8}}}}
 
-IMPORTANT — resolve company AND date from conversation context:
-1. Company: If the query uses pronouns ("their", "them", "it", "they", "the company") without naming a company, resolve using the conversation context.
-2. Date: Only inherit a prior date when the current query is a clear follow-up (uses pronouns, no company named, or phrases like "what about X"). If the query explicitly names a company but mentions no date, use date_expression: null (most recent call) — do NOT inherit a prior date_range.
-   Example: prior query had date_range {{"start": "{last_4q_start}", "end": "{today_iso}"}}, current query "Do they mention ACV?" → follow-up, inherit that date_range.
-   Example: prior query "ServiceNow revenue last 4 quarters", current query "What about their NRR" → follow-up with pronoun, inherit date_range → [{{"company_ticker": "NOW", "date_expression": null, "date_range": {{"start": "{last_4q_start}", "end": "{today_iso}"}}}}]
-   Example: prior query "ServiceNow revenue last 4 quarters", current query "ServiceNow revenue" → explicitly names company, no date → use date_expression: null (most recent only), do NOT inherit the range.
+User query: {resolution_query}"""
 
-Only return [] if there is truly no company identifiable from either the query or the conversation context.
-
-Reply with only a JSON object: {{ "entities": [ {{ "company_ticker": "<ticker>", "date_expression": "<or null>", "date_range": {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}} or null }}, ... ] }}
-
-User query: {query}"""
     try:
         client = get_openai_client()
-        input_messages = [
-            {
-                "role": "system",
-                "content": [
-                    {"type": "input_text", "text": "You output only valid JSON with key 'entities' (array of objects with company_ticker and date_expression)."},
-                ],
-            },
-            {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
-        ]
         t0 = time.perf_counter()
         response = await client.responses.create(
             model=get_settings().openai_model,
-            input=input_messages,
-            max_output_tokens=_RESOLUTION_MAX_TOKENS,
+            input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+            max_output_tokens=150,
         )
-        logger.info("[latency] _resolve_entities_via_llm: %.3fs", time.perf_counter() - t0)
+        logger.info("[latency] _resolve_scope_via_llm: %.3fs", time.perf_counter() - t0)
         raw = (
             response.output_text
             if hasattr(response, "output_text")
@@ -204,66 +156,150 @@ User query: {query}"""
         )
         content = (raw or "").strip()
         if not content:
-            return []
-        # Strip markdown code blocks if present (e.g. ```json ... ```)
+            return [], TemporalIntent()
+
+        content = _strip_json_fences(content)
+        data = json.loads(content)
+
+        # Parse tickers
+        raw_tickers = data.get("tickers", [])
+        tickers = [t.upper() for t in raw_tickers if isinstance(t, str) and t.strip().upper() in valid_tickers]
+
+        # Parse temporal intent
+        temporal_data = data.get("temporal", {})
+        temporal = TemporalIntent(
+            type=temporal_data.get("type", "unspecified"),
+            quarter=temporal_data.get("quarter"),
+            year=temporal_data.get("year"),
+            num_quarters=temporal_data.get("num_quarters"),
+        )
+        # Normalize 2-digit year
+        if temporal.year and temporal.year < 100:
+            temporal.year += 2000
+
+        logger.info("[debug] scope resolution: query=%r → tickers=%s, temporal=%s", query, tickers, temporal)
+        return tickers, temporal
+    except Exception as e:
+        logger.warning("Scope resolution failed: %s", e)
+        return [], TemporalIntent()
+
+
+def _find_closest_period(
+    periods: list[dict[str, Any]],
+    target_end: date,
+) -> dict[str, Any] | None:
+    """Find the period whose period_end is closest to target_end."""
+    if not periods:
+        return None
+    return min(
+        periods,
+        key=lambda p: abs((date.fromisoformat(p["period_end"]) - target_end).days),
+    )
+
+
+def _resolve_temporal(
+    tickers: list[str],
+    temporal: TemporalIntent,
+    available_periods: dict[str, list[dict[str, Any]]],
+    today: date | None = None,
+) -> list[tuple[str, str]] | None:
+    """Map temporal intent + tickers to specific (ticker, call_date) pairs.
+
+    Returns None when temporal resolution doesn't apply (unspecified),
+    meaning retrieval should use ticker-only filtering.
+    """
+    today = today or date.today()
+
+    if temporal.type == "unspecified":
+        return None
+
+    if temporal.type == "latest":
+        pairs = []
+        for t in tickers:
+            ticker_periods = available_periods.get(t, [])
+            if ticker_periods:
+                pairs.append((t, ticker_periods[0]["call_date"]))  # sorted desc
+        return pairs or None
+
+    if temporal.type == "specific_quarter":
+        if temporal.quarter is None:
+            return None
+        year = temporal.year or today.year
+
+        # Always resolve as calendar year quarter
+        target_end = compute_cy_quarter_end(temporal.quarter, year)
+
+        pairs = []
+        for t in tickers:
+            ticker_periods = available_periods.get(t, [])
+            if not ticker_periods:
+                continue
+            closest = _find_closest_period(ticker_periods, target_end)
+            if closest:
+                pairs.append((t, closest["call_date"]))
+
+        return pairs or None
+
+    if temporal.type == "range":
+        n = temporal.num_quarters or 4
+        pairs = []
+        for t in tickers:
+            ticker_periods = available_periods.get(t, [])
+            for p in ticker_periods[:n]:
+                pairs.append((t, p["call_date"]))
+        return pairs or None
+
+    return None
+
+
+async def _rewrite_query_for_retrieval(query: str) -> list[str]:
+    """Expand a user query into 2-3 retrieval queries covering different interpretations.
+
+    For financial queries this covers: reported/actual results vs guidance/outlook,
+    and alternative metric names. Falls back to [query] on any error.
+    """
+    sanitized_query = _sanitize_for_prompt(query, max_len=500)
+    prompt = f"""You are preparing search queries for an earnings call transcript database.
+
+Given this user query: "{sanitized_query}"
+
+Generate 2-3 short, distinct retrieval queries that together cover different interpretations:
+- Reported/actual results AND forward guidance or outlook (if about a financial metric)
+- Alternative names for the same metric (e.g. "revenue" → also "total revenue")
+- If the query is purely a formatting or display instruction ("sort by date", "show as table", "chronological order"), return just the original query unchanged.
+
+Keep each query under 15 words. Do not add company names — those are handled separately.
+
+Reply with only JSON: {{"queries": ["...", "...", "..."]}}"""
+
+    try:
+        client = get_openai_client()
+        t0 = time.perf_counter()
+        response = await client.responses.create(
+            model=get_settings().openai_model,
+            input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+            max_output_tokens=150,
+        )
+        logger.info("[latency] _rewrite_query_for_retrieval: %.3fs", time.perf_counter() - t0)
+        raw = (
+            response.output_text
+            if hasattr(response, "output_text")
+            else _extract_text_from_responses_output(getattr(response, "output", []))
+        )
+        content = (raw or "").strip()
+        if not content:
+            return [query]
         if content.startswith("```"):
             content = content.split("```")[1]
             if content.lstrip().lower().startswith("json"):
                 content = content.lstrip()[4:]
             content = content.strip()
-        # Strip BOM if present
-        if content.startswith("\ufeff"):
-            content = content[1:]
-        if not content:
-            return []
         data = json.loads(content)
-        raw_entities = data.get("entities")
-        if not isinstance(raw_entities, list):
-            return []
-        result: list[ResolvedEntity] = []
-        iso_pattern = re.compile(r"\d{4}-\d{2}-\d{2}")
-        for item in raw_entities:
-            if not isinstance(item, dict):
-                continue
-            ticker_raw = item.get("company_ticker")
-            ticker = (ticker_raw.strip().upper() if isinstance(ticker_raw, str) and ticker_raw else None) or None
-            if not ticker or ticker not in valid_tickers:
-                if ticker:
-                    logger.debug("Entity resolution LLM returned unknown ticker %s, skipping", ticker)
-                continue
-            date_expr = item.get("date_expression")
-            date_expr = (date_expr.strip() if isinstance(date_expr, str) and date_expr else None) or None
-            # Parse date_range if present
-            dr = item.get("date_range")
-            dr_start: str | None = None
-            dr_end: str | None = None
-            if isinstance(dr, dict):
-                s = dr.get("start", "")
-                e = dr.get("end", "")
-                if isinstance(s, str) and isinstance(e, str) and iso_pattern.fullmatch(s.strip()) and iso_pattern.fullmatch(e.strip()):
-                    dr_start, dr_end = s.strip(), e.strip()
-            result.append((ticker, date_expr, dr_start, dr_end))
-        logger.info("[debug] entity resolution: query=%r → raw=%s → result=%s", query, raw_entities, result)
-        return result
-    except (json.JSONDecodeError, KeyError, IndexError, AttributeError) as e:
-        raw_content = (raw or "").strip()[:500]
-        logger.warning(
-            "Entity resolution LLM parse failed: %s (raw: %r)",
-            e,
-            raw_content,
-        )
-        return []
+        queries = [q for q in data.get("queries", []) if isinstance(q, str) and q.strip()]
+        return queries or [query]
     except Exception as e:
-        logger.warning("Entity resolution LLM call failed: %s", e)
-        return []
-
-
-def _scope_cache_key(query: str, companies: list[dict[str, str]], today_iso: str, conversation_context: list[str] | None = None) -> tuple:
-    """Build cache key for entity resolution scope. Companies key is stable for same ticker/name set."""
-    normalized = query.strip().lower()[:500]
-    companies_key = tuple(sorted((c.get("ticker", ""), c.get("name", "")) for c in companies))
-    context_key = tuple((conversation_context or [])[-4:])
-    return (normalized, today_iso, companies_key, context_key)
+        logger.warning("Query rewriting failed: %s", e)
+        return [query]
 
 
 async def resolve_company_and_date(
@@ -271,71 +307,283 @@ async def resolve_company_and_date(
     companies: list[dict[str, str]],
     today_iso: str,
     conversation_context: list[str] | None = None,
+    available_periods: dict[str, list[dict[str, Any]]] | None = None,
 ) -> SimpleRAGScope:
-    """Resolve scope from LLM list of (entity, date) pairs.
+    """Resolve company tickers and temporal scope from the query.
 
-    Calls LLM to extract (company_ticker, date_expression) from the query.
-    Multi-entity: resolve to (ticker, call_date) pairs for OR filter; if none found, use no filter.
-    Results are cached (24h TTL) to reduce latency on repeated/similar queries.
+    When available_periods is provided, also performs temporal resolution
+    to map the user's temporal intent to specific (ticker, call_date) pairs.
+    Results cached 24h.
     """
-    cache_key = _scope_cache_key(query, companies, today_iso, conversation_context)
+    cache_key = _scope_cache_key(query, companies, conversation_context)
     if cache_key in _SCOPE_CACHE:
-        return SimpleRAGScope(resolved_date_pairs=_SCOPE_CACHE[cache_key])
+        return _SCOPE_CACHE[cache_key]
 
-    entities: list[ResolvedEntity] = []
-    if companies:
-        resolution_query = query
-        if conversation_context:
-            prior = "; ".join(conversation_context)  # all 4 prior queries
-            resolution_query = f"[Prior queries for context: {prior}] Current query: {query}"
-        entities = await _resolve_entities_via_llm(resolution_query, companies, today_iso)
+    tickers, temporal = (
+        await _resolve_scope_via_llm(query, companies, conversation_context)
+        if companies else ([], TemporalIntent())
+    )
 
-    if not entities:
-        _SCOPE_CACHE[cache_key] = None
-        return SimpleRAGScope()
+    scope = SimpleRAGScope(
+        tickers=tickers or None,
+        temporal_intent=temporal,
+    )
 
-    # Separate range entities (multi-quarter windows) from point entities (single call)
-    range_entities = [(ticker, dr_start, dr_end) for ticker, _, dr_start, dr_end in entities if dr_start and dr_end]
-    point_entities = [
-        (ticker, _date_expression_to_iso(date_expr, today_iso) or today_iso)
-        for ticker, date_expr, dr_start, _ in entities
-        if not dr_start
+    # Temporal resolution: map intent → specific (ticker, call_date) pairs
+    if tickers and available_periods and temporal.type != "unspecified":
+        today = date.fromisoformat(today_iso) if today_iso else date.today()
+        pairs = _resolve_temporal(tickers, temporal, available_periods, today)
+        if pairs:
+            scope.ticker_date_pairs = pairs
+            logger.info("[debug] temporal resolution: %s → %d pairs", temporal.type, len(pairs))
+
+    _SCOPE_CACHE[cache_key] = scope
+    return scope
+
+
+def trim_chunks_to_token_budget(
+    chunks: list[dict[str, Any]],
+    budget: int | None = None,
+) -> list[dict[str, Any]]:
+    """Drop lowest-relevance chunks until total content fits within *budget* tokens.
+
+    Chunks are assumed to be sorted by relevance (highest first). Financial summary
+    chunks (chunk_type == "financials") are prioritised and only dropped last.
+    """
+    budget = budget or get_settings().context_token_budget
+    # Partition: financials chunks are high-value, keep them separate.
+    financials: list[dict[str, Any]] = []
+    regular: list[dict[str, Any]] = []
+    for c in chunks:
+        meta = c.get("metadata") or {}
+        if meta.get("chunk_type") == "financials":
+            financials.append(c)
+        else:
+            regular.append(c)
+
+    # Start with all financials + regular (already relevance-sorted), trim from the tail.
+    ordered = financials + regular
+    total = sum(len(_tokenizer.encode(c.get("content", ""))) for c in ordered)
+
+    if total <= budget:
+        return chunks  # nothing to trim
+
+    # Drop lowest-relevance regular chunks first, then financials if still over.
+    trimmed = list(ordered)
+    while total > budget and trimmed:
+        dropped = trimmed.pop()
+        total -= len(_tokenizer.encode(dropped.get("content", "")))
+
+    logger.info(
+        "[token_budget] trimmed %d → %d chunks (~%d tokens, budget=%d)",
+        len(chunks), len(trimmed), total, budget,
+    )
+    return trimmed
+
+
+def reorder_chunks_for_range(
+    chunks: list[dict[str, Any]],
+    scope: "SimpleRAGScope",
+) -> list[dict[str, Any]]:
+    """For range queries, reorder chunks chronologically with financials first per period.
+
+    Instead of relevance-sorted order (which mixes periods), this groups chunks by
+    period and sorts oldest-first so the LLM can clearly track which data belongs
+    to which quarter without confusing figures across periods.
+    """
+    if not scope.temporal_intent or scope.temporal_intent.type != "range":
+        return chunks
+
+    def _sort_key(chunk: dict[str, Any]) -> tuple[str, int]:
+        meta = chunk.get("metadata") or {}
+        period_end = meta.get("period_end", "")
+        call_date = meta.get("call_date", "")
+        is_financials = 0 if meta.get("chunk_type") == "financials" else 1
+        return (period_end or call_date or "9999", is_financials)
+
+    return sorted(chunks, key=_sort_key)
+
+
+def build_resolution_note(
+    scope: "SimpleRAGScope",
+    available_periods: dict[str, list[dict[str, Any]]],
+) -> str:
+    """Build a note explaining temporal resolution so the answer LLM knows
+    which periods were matched, even when fiscal labels differ from the user's wording."""
+    if not scope.ticker_date_pairs or not scope.temporal_intent:
+        return ""
+
+    intent = scope.temporal_intent
+    if intent.type == "unspecified":
+        return ""
+
+    # Describe the target period
+    if intent.type == "latest":
+        target_desc = "the most recent available quarter"
+    elif intent.type == "specific_quarter" and intent.quarter:
+        year = intent.year or "current year"
+        target_desc = f"CY Q{intent.quarter} {year} (calendar year)"
+    elif intent.type == "range":
+        n = intent.num_quarters or 4
+        target_desc = f"the last {n} quarters"
+    else:
+        target_desc = "the requested time period"
+
+    lines = [
+        f"TEMPORAL RESOLUTION: The user's query has been resolved to {target_desc}. "
+        "The context below contains the CORRECT data for this request. Resolved periods:"
     ]
 
-    resolved_pairs: list[tuple[str, str]] = []
+    for ticker, call_date in scope.ticker_date_pairs:
+        ticker_periods = available_periods.get(ticker, [])
+        match = next((p for p in ticker_periods if p["call_date"] == call_date), None)
+        if match:
+            fq = match.get("fiscal_quarter", "")
+            pe_str = match.get("period_end", "")
+            label = ""
+            if pe_str:
+                try:
+                    label = period_end_to_label(date.fromisoformat(pe_str))
+                except (ValueError, TypeError):
+                    pass
+            parts = [ticker]
+            if fq:
+                parts.append(fq)
+            if label:
+                parts.append(f"covers {label}")
+            lines.append(f"  - {' | '.join(parts)}")
+        else:
+            lines.append(f"  - {ticker} | call date {call_date}")
 
-    coros = []
-    if range_entities:
-        coros.append(resolve_entities_to_call_dates_in_ranges(range_entities))
-    if point_entities:
-        coros.append(resolve_entities_to_call_dates(point_entities))
+    # Build explicit user-query → fiscal-quarter mapping
+    mapping_lines = []
+    for ticker, call_date in scope.ticker_date_pairs:
+        ticker_periods = available_periods.get(ticker, [])
+        match = next((p for p in ticker_periods if p["call_date"] == call_date), None)
+        if match and match.get("fiscal_quarter"):
+            fq = match["fiscal_quarter"]
+            pe_str = match.get("period_end", "")
+            label = ""
+            if pe_str:
+                try:
+                    label = f" ({period_end_to_label(date.fromisoformat(pe_str))})"
+                except (ValueError, TypeError):
+                    pass
+            mapping_lines.append(f"  → {ticker}: the user's query = {fq}{label} in the transcript")
 
-    t0 = time.perf_counter()
-    results = await asyncio.gather(*coros)
-    logger.info("[latency] resolve call dates (parallel): %.3fs", time.perf_counter() - t0)
-    for r in results:
-        resolved_pairs.extend(r)
+    if mapping_lines:
+        lines.append("MAPPING (user's query → transcript fiscal quarter):")
+        lines.extend(mapping_lines)
 
-    if not resolved_pairs:
-        logger.warning("Entity resolution: no call dates found for %s, using no filter", entities)
+    lines.append(
+        "IMPORTANT: Do NOT second-guess this resolution or say data is missing. "
+        "The resolved fiscal quarter IS the correct answer to the user's query — report it directly. "
+        "When citing data, use the company's fiscal quarter label from the transcript "
+        "and include the calendar period for clarity "
+        "(e.g. \"Q4 FY2025 (Apr–Jun 2025) revenue was $70.1B\")."
+    )
 
-    logger.info("Simple RAG: %d entities → %d resolved pairs", len(entities), len(resolved_pairs))
-    pairs = resolved_pairs or None
-    _SCOPE_CACHE[cache_key] = pairs
-    return SimpleRAGScope(resolved_date_pairs=pairs)
+    # Range-specific instructions: help LLM organize multi-period data correctly
+    if intent.type == "range":
+        lines.append("")
+        lines.append(
+            "RANGE QUERY INSTRUCTIONS: The context below is organized chronologically by period. "
+            "Each period's FINANCIAL SUMMARY chunk contains the authoritative figures for that quarter. "
+            "You MUST:"
+        )
+        lines.append(
+            "  1. Present data as a structured table or clearly labeled list with one entry per period."
+        )
+        lines.append(
+            "  2. Match each figure to its EXACT fiscal quarter — never combine or confuse "
+            "figures from different periods. A YTD or trailing-12-month figure belongs to "
+            "the quarter it was reported in, not to prior quarters."
+        )
+        lines.append(
+            "  3. If the user asks for an annual total but only quarterly figures are available, "
+            "sum the individual quarters and show the calculation. Do NOT use a YTD figure "
+            "from one quarter as the annual total for a different fiscal year."
+        )
+        lines.append(
+            "  4. If a specific figure is not available for a period, say 'Not reported' "
+            "rather than approximating from other periods."
+        )
+
+    return "\n".join(lines)
+
+
+def rewrite_query_for_answer_llm(
+    query: str,
+    scope: "SimpleRAGScope",
+    available_periods: dict[str, list[dict[str, Any]]],
+) -> str:
+    """Rewrite the user query replacing calendar quarter references with the
+    company's fiscal quarter label so the answer LLM never sees conflicting
+    quarter numbers between the query and the transcript.
+
+    Example: "MSFT Q2 25 revenue" → "MSFT Q4 FY2025 (Apr–Jun 2025) revenue"
+    """
+    if not scope.ticker_date_pairs or not scope.temporal_intent:
+        return query
+    intent = scope.temporal_intent
+    if intent.type not in ("specific_quarter", "latest"):
+        return query
+
+    # Build ticker → fiscal quarter label mapping
+    ticker_labels: dict[str, str] = {}
+    for ticker, call_date in scope.ticker_date_pairs:
+        ticker_periods = available_periods.get(ticker, [])
+        match = next((p for p in ticker_periods if p["call_date"] == call_date), None)
+        if match and match.get("fiscal_quarter"):
+            fq = match["fiscal_quarter"]
+            pe_str = match.get("period_end", "")
+            label = ""
+            if pe_str:
+                try:
+                    label = f" ({period_end_to_label(date.fromisoformat(pe_str))})"
+                except (ValueError, TypeError):
+                    pass
+            ticker_labels[ticker] = f"{fq}{label}"
+
+    if not ticker_labels:
+        return query
+
+    # Append fiscal quarter context to the query
+    if len(ticker_labels) == 1:
+        ticker, fq_label = next(iter(ticker_labels.items()))
+        return f"{query} [{ticker} {fq_label}]"
+    else:
+        parts = [f"{t} {l}" for t, l in ticker_labels.items()]
+        return f"{query} [{'; '.join(parts)}]"
 
 
 def _format_context_for_prompt(chunks: list[dict[str, Any]]) -> str:
-    """Format retrieved chunks for the prompt; include company_ticker and call_date so the LLM knows which company/period each chunk is from."""
+    """Format retrieved chunks for the prompt; include company_ticker, call_date, and calendar period so the LLM knows which company/period each chunk is from."""
     parts = []
     for i, c in enumerate(chunks, 1):
         meta = c.get("metadata") or {}
         ticker = meta.get("company_ticker", "")
-        title = meta.get("title", "Unknown")
+        company_name = meta.get("company_name", "")
         call_date = meta.get("call_date", "")
+        fiscal_quarter = meta.get("fiscal_quarter", "")
+        period_end_str = meta.get("period_end", "")
         sim = c.get("similarity", 0.0)
-        # company_ticker comes from ingestion (required at upload); title may only have date
-        label_parts = [p for p in [ticker, title, call_date] if p]
-        source_label = " | ".join(label_parts) if label_parts else "Unknown"
+        company_label = f"{ticker} ({company_name})" if company_name else ticker
+
+        # Build period label: fiscal quarter + calendar period (from period_end) + call date
+        period_parts = []
+        if fiscal_quarter:
+            period_parts.append(fiscal_quarter)
+        if period_end_str:
+            try:
+                pe = date.fromisoformat(period_end_str)
+                period_parts.append(period_end_to_label(pe))
+            except (ValueError, TypeError):
+                pass
+        if call_date:
+            period_parts.append(call_date)
+        period = " | ".join(period_parts)
+
+        source_label = f"{company_label} | {period}" if period else company_label or "Unknown"
         parts.append(f"[Source {i}: {source_label} (relevance: {sim:.2f})]\n{c.get('content', '')}")
     return "\n\n---\n\n".join(parts) if parts else ""

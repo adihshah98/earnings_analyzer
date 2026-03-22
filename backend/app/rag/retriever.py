@@ -9,13 +9,14 @@ from uuid import UUID
 from typing import Any, Literal
 
 from cachetools import TTLCache
-from sqlalchemy import and_, desc, func, or_, select, text
+from sqlalchemy import and_, desc, func, or_, select
 
 from app.config import get_settings
 from app.evals.context import use_eval_chunks
 from app.models.database import get_session
 from app.models.db_models import DocumentChunk, EvalDocumentChunk
 from app.rag.embeddings import generate_embedding
+from app.rag.ticker_map import TICKER_NAMES
 
 
 def _get_chunk_model():
@@ -27,41 +28,6 @@ logger = logging.getLogger(__name__)
 SearchMode = Literal["vector", "keyword", "hybrid"]
 RRF_K = 60  # Reciprocal Rank Fusion constant
 
-# Stopwords to drop for OR-based keyword search (improves recall on natural-language queries)
-_KEYWORD_STOPWORDS = frozenset({
-    "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
-    "her", "was", "one", "our", "out", "has", "have", "this", "that",
-    "with", "from", "what", "when", "where", "which", "who", "will",
-    "your", "how", "many", "did", "in", "its", "into", "just", "than",
-    "then", "them", "they", "been", "being", "would", "could", "should",
-})
-
-
-def _build_or_tsquery_terms(query: str, max_terms: int = 10) -> str | None:
-    """Extract significant terms and build 'term1 | term2 | ...' for to_tsquery.
-
-    Uses OR logic so chunks matching ANY term are returned (higher recall).
-    ts_rank still favors chunks with more matches.
-    """
-    words = re.findall(r"\b[a-zA-Z0-9]+\b", query.lower())
-    terms = [w for w in words if len(w) >= 2 and w not in _KEYWORD_STOPWORDS]
-    if not terms:
-        return None
-    seen: set[str] = set()
-    unique: list[str] = []
-    for t in terms[:max_terms]:
-        if t not in seen:
-            seen.add(t)
-            unique.append(t)
-    return " | ".join(unique) if unique else None
-
-
-def _build_search_query(query: str, conversation_context: list[str] | None = None) -> str:
-    """Build search query with optional conversation context for better retrieval."""
-    if not conversation_context:
-        return query
-    context_str = " ".join(conversation_context[-3:])  # Last 3 queries
-    return f"Previous context: {context_str}. Current question: {query}".strip()
 
 
 def _rrf_merge(
@@ -97,156 +63,36 @@ def _rrf_merge(
 
 
 
-async def _resolve_entity_dates_batch(
-    entity_dates: list[tuple[str, str]],
-) -> list[tuple[str, str]]:
-    """Resolve all (ticker, as_of_date_iso) pairs in a single DB query.
-
-    Uses the latest call on or before as_of_date per company. Returns only pairs
-    that have a matching call in the DB. Results are cached (24h TTL).
-
-    Args:
-        entity_dates: List of (company_ticker, as_of_date_iso).
-
-    Returns:
-        List of (company_ticker, call_date) pairs.
-    """
-    if not entity_dates:
-        return []
-
-    cache_key = (tuple(sorted(entity_dates)), use_eval_chunks())
-    if cache_key in _BATCH_DATE_RESOLUTION_CACHE:
-        return _BATCH_DATE_RESOLUTION_CACHE[cache_key]
-
-    Chunk = _get_chunk_model()
-    table_name = Chunk.__table__.name
-
-    tickers = [ticker for ticker, _ in entity_dates]
-    as_of_dates = [as_of for _, as_of in entity_dates]
-
-    t0 = time.perf_counter()
-    # Single query: unnest + LATERAL to resolve all pairs using real indexed columns
-    stmt = text(f"""
-        WITH inputs(ticker, as_of_date) AS (
-            SELECT * FROM unnest(CAST(:tickers AS text[]), CAST(:as_of_dates AS text[])) AS t(ticker, as_of_date)
-        )
-        SELECT i.ticker, l.call_date
-        FROM inputs i,
-        LATERAL (
-            SELECT MAX(c.call_date) AS call_date
-            FROM {table_name} c
-            WHERE c.company_ticker = i.ticker
-              AND c.call_date <= i.as_of_date
-              AND c.call_date IS NOT NULL
-        ) l
-        WHERE l.call_date IS NOT NULL
-    """)
-
-    async with get_session() as session:
-        result = await session.execute(
-            stmt, {"tickers": tickers, "as_of_dates": as_of_dates}
-        )
-        rows = result.mappings().all()
-
-    pairs = [(row["ticker"], row["call_date"]) for row in rows]
-    _BATCH_DATE_RESOLUTION_CACHE[cache_key] = pairs
-    logger.info(
-        "[latency] _resolve_entity_dates_batch: %.3fs (%d entities → %d pairs)",
-        time.perf_counter() - t0,
-        len(entity_dates),
-        len(pairs),
-    )
-    return pairs
-
-
-async def resolve_entities_to_call_dates(
-    entity_dates: list[tuple[str, str]],
-) -> list[tuple[str, str]]:
-    """Resolve (ticker, as_of_date_iso) to (ticker, call_date) for each entity.
-
-    Uses a single batched query for all pairs to minimize DB round-trips.
-
-    Args:
-        entity_dates: List of (company_ticker, as_of_date_iso).
-
-    Returns:
-        List of (company_ticker, call_date) pairs.
-    """
-    return await _resolve_entity_dates_batch(entity_dates)
-
-
-async def resolve_entities_to_call_dates_in_ranges(
-    entity_ranges: list[tuple[str, str, str]],
-) -> list[tuple[str, str]]:
-    """Return all distinct (ticker, call_date) pairs where call_date falls within [start, end].
-
-    Used for range queries like "last year" or "past 4 quarters" so every quarterly
-    earnings call in the window is retrieved, not just the most recent one.
-
-    Args:
-        entity_ranges: List of (company_ticker, start_iso, end_iso).
-
-    Returns:
-        List of (company_ticker, call_date) pairs — potentially multiple per ticker.
-    """
-    if not entity_ranges:
-        return []
-
-    Chunk = _get_chunk_model()
-    conditions = [
-        and_(
-            Chunk.company_ticker == ticker,
-            Chunk.call_date >= start_iso,
-            Chunk.call_date <= end_iso,
-            Chunk.call_date.isnot(None),
-        )
-        for ticker, start_iso, end_iso in entity_ranges
-    ]
-
-    stmt = (
-        select(Chunk.company_ticker, Chunk.call_date)
-        .where(or_(*conditions))
-        .distinct()
-        .order_by(Chunk.company_ticker, Chunk.call_date)
-    )
-
-    t0 = time.perf_counter()
-    async with get_session() as session:
-        result = await session.execute(stmt)
-        rows = result.all()
-    logger.info(
-        "[latency] resolve_entities_to_call_dates_in_ranges: %.3fs (%d ranges → %d pairs)",
-        time.perf_counter() - t0,
-        len(entity_ranges),
-        len(rows),
-    )
-    return [(row[0], row[1]) for row in rows]
 
 
 
 def _apply_metadata_filters(stmt, filter_metadata: dict[str, Any] | None, chunk_model=None):
-    """Apply JSONB metadata filters to a SQLAlchemy select statement.
+    """Apply metadata filters to a SQLAlchemy select statement.
 
-    Handles the special ``_resolved_date_pairs`` key (list of (ticker, call_date) pairs).
+    Special keys:
+        ``_ticker_date_pairs``: list of (ticker, call_date) tuples — most specific filter.
+        ``_tickers``: list of ticker strings — broader ticker-only filter.
     """
     Chunk = chunk_model or _get_chunk_model()
     if not filter_metadata:
         return stmt
 
-    resolved_pairs = filter_metadata.get("_resolved_date_pairs")
-    if resolved_pairs:
+    # _ticker_date_pairs is the most specific: filter to exact (ticker, call_date) combos
+    ticker_date_pairs = filter_metadata.get("_ticker_date_pairs")
+    if ticker_date_pairs:
         conditions = [
-            and_(Chunk.company_ticker == ticker, Chunk.call_date == call_date)
-            for ticker, call_date in resolved_pairs
+            and_(Chunk.company_ticker == t, Chunk.call_date == d)
+            for t, d in ticker_date_pairs
         ]
         stmt = stmt.where(or_(*conditions))
+    else:
+        tickers = filter_metadata.get("_tickers")
+        if tickers:
+            stmt = stmt.where(Chunk.company_ticker.in_(tickers))
 
     for key, value in filter_metadata.items():
         if key.startswith("_"):
             continue
-        if resolved_pairs and key in ("company_ticker", "call_date"):
-            continue
-        # Use real columns for the two indexed fields; fall back to JSONB for others
         if key == "company_ticker":
             stmt = stmt.where(Chunk.company_ticker == str(value))
         elif key == "call_date":
@@ -311,80 +157,49 @@ async def _retrieve_keyword(
     top_k: int,
     filter_metadata: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Retrieve chunks using PostgreSQL full-text search (ts_rank, BM25-style).
+    """Retrieve chunks using PostgreSQL full-text search (ts_rank).
 
-    Uses OR between significant terms (term1 | term2 | term3) so chunks matching
-    ANY term are returned. ts_rank favors chunks with more matches. Fallback
-    to plainto_tsquery if OR query fails or yields no terms.
+    Uses websearch_to_tsquery (phrase-aware, AND-based) for precise matching,
+    with fallback to plainto_tsquery on parse errors.
     """
     Chunk = _get_chunk_model()
-    or_str = _build_or_tsquery_terms(query)
-    if or_str:
-        ts_query = func.to_tsquery("english", or_str)
-    else:
-        ts_query = func.plainto_tsquery("english", query)
-    rank_expr = func.coalesce(
-        func.ts_rank(Chunk.content_tsv, ts_query), 0
-    )
 
-    stmt = (
-        select(
-            Chunk.id,
-            Chunk.content,
-            Chunk.chunk_metadata,
-            rank_expr.label("similarity"),
+    def _build_stmt(ts_query):
+        rank_expr = func.coalesce(func.ts_rank(Chunk.content_tsv, ts_query), 0)
+        stmt = (
+            select(Chunk.id, Chunk.content, Chunk.chunk_metadata, rank_expr.label("similarity"))
+            .where(Chunk.content_tsv.op("@@")(ts_query))
+            .order_by(desc(rank_expr))
+            .limit(top_k)
         )
-        .where(Chunk.content_tsv.op("@@")(ts_query))
-        .order_by(desc(rank_expr))
-        .limit(top_k)
-    )
-    stmt = _apply_metadata_filters(stmt, filter_metadata, Chunk)
+        return _apply_metadata_filters(stmt, filter_metadata, Chunk), rank_expr
 
     t0 = time.perf_counter()
     async with get_session() as session:
         try:
+            ts_query = func.websearch_to_tsquery("english", query)
+            stmt, _ = _build_stmt(ts_query)
             result = await session.execute(stmt)
         except Exception as e:
             err = str(e).lower()
             if "content_tsv" in err:
-                # Column doesn't exist (migration not run) - use to_tsvector on the fly
+                # Migration not yet run — compute tsvector on the fly
                 tsv = func.to_tsvector("english", Chunk.content)
-                ts_query_fb = func.plainto_tsquery("english", query)
+                ts_query_fb = func.websearch_to_tsquery("english", query)
                 rank_expr_fb = func.coalesce(func.ts_rank(tsv, ts_query_fb), 0)
                 stmt_fb = (
-                    select(
-                        Chunk.id,
-                        Chunk.content,
-                        Chunk.chunk_metadata,
-                        rank_expr_fb.label("similarity"),
-                    )
+                    select(Chunk.id, Chunk.content, Chunk.chunk_metadata, rank_expr_fb.label("similarity"))
                     .where(tsv.op("@@")(ts_query_fb))
                     .order_by(desc(rank_expr_fb))
                     .limit(top_k)
                 )
                 stmt_fb = _apply_metadata_filters(stmt_fb, filter_metadata, Chunk)
                 result = await session.execute(stmt_fb)
-            elif "tsquery" in err or "syntax" in err:
-                # to_tsquery failed (invalid OR syntax) - retry with plainto_tsquery
-                ts_query_fb = func.plainto_tsquery("english", query)
-                rank_expr_fb = func.coalesce(
-                    func.ts_rank(Chunk.content_tsv, ts_query_fb), 0
-                )
-                stmt_fb = (
-                    select(
-                        Chunk.id,
-                        Chunk.content,
-                        Chunk.chunk_metadata,
-                        rank_expr_fb.label("similarity"),
-                    )
-                    .where(Chunk.content_tsv.op("@@")(ts_query_fb))
-                    .order_by(desc(rank_expr_fb))
-                    .limit(top_k)
-                )
-                stmt_fb = _apply_metadata_filters(stmt_fb, filter_metadata, Chunk)
-                result = await session.execute(stmt_fb)
             else:
-                raise
+                # Any other error: fall back to plainto_tsquery (AND-based, very permissive)
+                ts_query_fb = func.plainto_tsquery("english", query)
+                stmt_fb, _ = _build_stmt(ts_query_fb)
+                result = await session.execute(stmt_fb)
 
         rows = result.mappings().all()
     logger.info("[latency] _retrieve_keyword DB: %.3fs", time.perf_counter() - t0)
@@ -429,7 +244,7 @@ async def retrieve_relevant_chunks(
     Returns:
         List of matching chunks with content, metadata, and similarity scores.
     """
-    search_query = _build_search_query(query, conversation_context)
+    search_query = query
     settings = get_settings()
     top_k = top_k or settings.retrieval_top_k
     threshold = threshold if threshold is not None else settings.retrieval_threshold
@@ -507,6 +322,44 @@ async def retrieve_relevant_chunks(
     return formatted
 
 
+async def get_financials_chunks_for_pairs(
+    ticker_date_pairs: list[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    """Fetch financial summary chunks for specific (ticker, call_date) pairs.
+
+    Used to guarantee financials chunks are always in context for any call date
+    already represented in the main retrieval results.
+    """
+    if not ticker_date_pairs:
+        return []
+
+    Chunk = _get_chunk_model()
+    conditions = [
+        and_(Chunk.company_ticker == t, Chunk.call_date == d)
+        for t, d in ticker_date_pairs
+    ]
+    stmt = (
+        select(Chunk.id, Chunk.content, Chunk.chunk_metadata, Chunk.company_ticker, Chunk.call_date)
+        .where(or_(*conditions))
+        .where(Chunk.chunk_metadata["chunk_type"].astext == "financials")
+        .order_by(Chunk.company_ticker, Chunk.call_date.desc())
+    )
+
+    async with get_session() as session:
+        result = await session.execute(stmt)
+        rows = result.mappings().all()
+
+    return [
+        {
+            "chunk_id": str(row["id"]),
+            "content": row["content"],
+            "similarity": 1.0,
+            "metadata": row["chunk_metadata"] or {},
+        }
+        for row in rows
+    ]
+
+
 async def list_available_transcripts(
     company_ticker: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -553,7 +406,8 @@ async def list_available_transcripts(
 # On multi-instance deployments, each process has its own cache; no distributed cache.
 _COMPANIES_CACHE: TTLCache = TTLCache(maxsize=2, ttl=86400)  # 24 hours
 
-_BATCH_DATE_RESOLUTION_CACHE: TTLCache = TTLCache(maxsize=500, ttl=86400)
+# Available periods cache: {ticker: [{call_date, fiscal_quarter, period_end}, ...]} sorted desc.
+_PERIODS_CACHE: TTLCache = TTLCache(maxsize=2, ttl=86400)  # 24 hours
 
 
 async def get_known_companies() -> list[dict[str, str]]:
@@ -596,15 +450,65 @@ async def _get_known_companies_impl() -> list[dict[str, str]]:
     companies: list[dict[str, str]] = []
     for row in rows:
         ticker = row["company_ticker"]
-        title = row["title"] or ""
-        name = re.sub(
-            r"\s+Q\d\s+\d{4}\s+Earnings.*$", "", title, flags=re.IGNORECASE
-        ).strip()
+        name = TICKER_NAMES.get(ticker)
         if not name:
-            name = ticker
+            title = row["title"] or ""
+            name = re.sub(
+                r"\s+(?:Q\d\s+\d{4}|Manual)\s+Earnings.*$", "", title, flags=re.IGNORECASE
+            ).strip() or ticker
         companies.append({"ticker": ticker, "name": name})
 
     return companies
+
+
+async def get_available_periods() -> dict[str, list[dict[str, Any]]]:
+    """Return available periods per ticker: {ticker: [{call_date, fiscal_quarter, period_end}, ...]}.
+
+    Each ticker's list is sorted by period_end descending (most recent first).
+    Cached for 24h, cleared on ingestion.
+    """
+    cache_key = "periods_eval" if use_eval_chunks() else "periods"
+    if cache_key in _PERIODS_CACHE:
+        return _PERIODS_CACHE[cache_key]
+
+    result = await _get_available_periods_impl()
+    _PERIODS_CACHE[cache_key] = result
+    return result
+
+
+async def _get_available_periods_impl() -> dict[str, list[dict[str, Any]]]:
+    """Internal: query available periods from DB (uncached)."""
+    Chunk = _get_chunk_model()
+
+    stmt = (
+        select(
+            Chunk.company_ticker,
+            Chunk.call_date,
+            Chunk.fiscal_quarter,
+            Chunk.period_end,
+        )
+        .where(Chunk.company_ticker.isnot(None))
+        .where(Chunk.call_date.isnot(None))
+        .where(Chunk.period_end.isnot(None))
+        .distinct()
+        .order_by(Chunk.company_ticker, Chunk.period_end.desc())
+    )
+
+    async with get_session() as session:
+        result = await session.execute(stmt)
+        rows = result.all()
+
+    periods: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        ticker = row[0]
+        entry = {
+            "call_date": row[1],
+            "fiscal_quarter": row[2],
+            "period_end": row[3].isoformat() if row[3] else None,
+        }
+        periods.setdefault(ticker, []).append(entry)
+
+    return periods
 
 
 async def retrieve_by_doc_id(doc_id: str, use_eval_table: bool = False) -> list[dict[str, Any]]:

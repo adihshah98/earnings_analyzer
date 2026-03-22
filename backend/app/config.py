@@ -27,9 +27,10 @@ class Settings(BaseSettings):
     # RAG
     chunk_size: int = 512
     chunk_overlap: int = 64
-    retrieval_top_k: int = 5
-    retrieval_threshold: float = 0.4  # Lowered from 0.5 to return more chunks; 0 = no filter
+    retrieval_top_k: int = 20
+    retrieval_threshold: float = 0.3
     default_search_mode: str = "hybrid"
+    context_token_budget: int = 80_000  # max tokens for retrieved context in the system prompt
 
     # Agent
     max_tool_calls: int = 5

@@ -29,11 +29,6 @@ export function MessageBubble({ message, onToggleSources, isSourcesShown }: Prop
         </div>
         {!isUser && (
           <div className="message-meta">
-            {typeof message.confidence === 'number' && (
-              <span className="confidence-pill">
-                Confidence {(message.confidence * 100).toFixed(0)}%
-              </span>
-            )}
             {hasSources && onToggleSources && (
               <button type="button" className="view-sources-button" onClick={onToggleSources}>
                 {isSourcesShown ? 'Hide sources' : `View sources (${message.sources!.length})`}

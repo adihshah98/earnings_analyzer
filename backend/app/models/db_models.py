@@ -1,12 +1,13 @@
 """SQLAlchemy ORM models for database tables."""
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Computed,
+    Date,
     DateTime,
     ForeignKey,
     Integer,
@@ -78,6 +79,8 @@ class DocumentChunk(Base):
     )
     company_ticker: Mapped[str | None] = mapped_column(String, nullable=True, index=False)
     call_date: Mapped[str | None] = mapped_column(String, nullable=True, index=False)
+    fiscal_quarter: Mapped[str | None] = mapped_column(String, nullable=True, index=False)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     source_doc_id: Mapped[str | None] = mapped_column(String, nullable=True)
     chunk_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(
@@ -118,6 +121,8 @@ class EvalDocumentChunk(Base):
     )
     company_ticker: Mapped[str | None] = mapped_column(String, nullable=True, index=False)
     call_date: Mapped[str | None] = mapped_column(String, nullable=True, index=False)
+    fiscal_quarter: Mapped[str | None] = mapped_column(String, nullable=True, index=False)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     source_doc_id: Mapped[str | None] = mapped_column(String, nullable=True)
     chunk_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(

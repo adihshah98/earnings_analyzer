@@ -81,7 +81,7 @@ export function SourceCard({ source, index, onViewTranscript }: Props) {
     >
       <div className="source-card-header">
         <div className="source-title">
-          #{index + 1} {title}
+          [Source {source.source_index ?? index + 1}] {title}
         </div>
         <div className="similarity-pill">{similarityPercent}% match</div>
       </div>
