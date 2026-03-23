@@ -15,7 +15,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY alembic/ ./alembic/
 COPY alembic.ini .
-COPY eval_data/ ./eval_data/
 COPY eval_datasets/ ./eval_datasets/
 COPY scripts/ ./scripts/
 
