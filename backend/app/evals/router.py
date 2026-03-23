@@ -42,6 +42,7 @@ async def run_evaluation(dataset_name: str):
 async def run_retrieval_evaluation(
     dataset_name: str,
     top_k: int = 5,
+    progress: bool = True,
 ):
     """Run retrieval evals comparing vector, keyword, and hybrid search modes.
 
@@ -54,6 +55,7 @@ async def run_retrieval_evaluation(
             result = await run_retrieval_eval(
                 dataset_name=dataset_name,
                 top_k=top_k,
+                progress=progress,
             )
         return retrieval_eval_to_dict(result)
     except FileNotFoundError:

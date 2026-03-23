@@ -3,6 +3,8 @@
 import hashlib
 import logging
 import uuid
+
+from tqdm import tqdm
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -146,6 +148,7 @@ async def run_retrieval_eval(
     top_k: int = 5,
     save_chunks: bool = False,
     tag_filter: list[str] | None = None,
+    progress: bool = True,
 ) -> RetrievalEvalResult:
     """Run retrieval evals across vector, keyword, and hybrid modes.
 
@@ -158,6 +161,7 @@ async def run_retrieval_eval(
         top_k: Number of results to retrieve per query.
         save_chunks: If True, include retrieved chunks in case_details for debugging.
         tag_filter: If set, only run cases whose tags contain at least one match.
+        progress: If True, show a tqdm progress bar over cases (no per-query text).
 
     Returns:
         RetrievalEvalResult with scores by mode and per-case details.
@@ -174,19 +178,32 @@ async def run_retrieval_eval(
     tag_mode_scores: dict[str, dict[str, list[tuple[float, float, float, float]]]] = {}
     case_details: list[dict[str, Any]] = []
 
+    cases_to_run = []
+    for case in dataset.cases:
+        q = case.inputs.get("query", "") if isinstance(case.inputs, dict) else str(case.inputs)
+        if q:
+            cases_to_run.append(case)
+
     logger.info(
         f"Starting retrieval eval {run_id}: dataset='{dataset_name}', "
-        f"cases={len(dataset.cases)}, top_k={top_k}"
+        f"cases={len(cases_to_run)}, top_k={top_k}"
     )
 
-    for case in dataset.cases:
+    n_cases = len(cases_to_run)
+    case_iter = enumerate(cases_to_run, start=1)
+    if progress and n_cases > 0:
+        case_iter = tqdm(
+            case_iter,
+            total=n_cases,
+            desc=f"retrieval {run_id}",
+            unit="case",
+            leave=True,
+        )
+    for _, case in case_iter:
         query = case.inputs.get("query", "") if isinstance(case.inputs, dict) else str(case.inputs)
         case_meta = case.metadata if isinstance(case.metadata, dict) else {}
         expected_sources: list[str] = case_meta.get("expected_sources", [])
         tags: list[str] = case_meta.get("tags", [])
-
-        if not query:
-            continue
 
         case_result: dict[str, Any] = {
             "query": query,

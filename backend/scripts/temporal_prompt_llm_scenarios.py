@@ -1,12 +1,8 @@
-"""Stress test: Does the answer LLM correctly handle temporal resolution
-across various fiscal calendar mismatches?
+"""Manual LLM stress script: temporal / fiscal resolution in the answer prompt.
 
-Scenarios:
-1. CRM "Q4 25" → Q4 FY2026 (Nov–Jan) — FY ends Jan, fiscal label differs
-2. MSFT "Q2 25" → Q2 FY2025 (Oct–Dec 2024) — FY ends June, big offset
-3. NOW vs CRM "Q4 25" — cross-company comparison, different fiscal calendars
-4. IOT "latest revenue" — latest quarter, no specific time
-5. PANW "last 4 quarters" — range query, FY ends July
+Run from repo: ``cd backend && python scripts/temporal_prompt_llm_scenarios.py`` (requires .env).
+
+Not part of the pytest suite; kept under ``scripts/`` so ``tests/`` only contains real tests.
 """
 
 import asyncio
@@ -19,6 +15,7 @@ BACKEND_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(BACKEND_ROOT))
 
 from dotenv import load_dotenv
+
 load_dotenv(BACKEND_ROOT / ".env")
 
 from app.agents.prompt_utils import build_system_prompt, format_known_tickers
@@ -29,9 +26,9 @@ from app.agents.simple_rag import (
     rewrite_query_for_answer_llm,
     _format_context_for_prompt,
 )
+from app.config import get_settings
 from app.prompts.templates import SIMPLE_RAG_SYSTEM_PROMPT
 from app.rag.embeddings import get_openai_client
-from app.config import get_settings
 
 
 ALL_COMPANIES = [
@@ -45,8 +42,6 @@ ALL_COMPANIES = [
 
 # =============================================================================
 # Scenario 1: CRM "Q4 25" → Q4 FY2026 (Nov 2025–Jan 2026)
-# User says Q4, transcript says Q4 FY2026. Fiscal label happens to match on
-# quarter number but the FY year differs from what user said.
 # =============================================================================
 SCENARIO_1 = {
     "name": "CRM Q4 25 — FY ends Jan, fiscal year mismatch",
@@ -75,20 +70,17 @@ SCENARIO_1 = {
             ),
             "similarity": 0.92,
             "metadata": {
-                "company_ticker": "CRM", "company_name": "Salesforce",
-                "call_date": "2026-03-05", "fiscal_quarter": "Q4 FY2026",
-                "period_end": "2026-01-31", "chunk_type": "financials",
+                "company_ticker": "CRM",
+                "company_name": "Salesforce",
+                "call_date": "2026-03-05",
+                "fiscal_quarter": "Q4 FY2026",
+                "period_end": "2026-01-31",
+                "chunk_type": "financials",
             },
         },
     ],
 }
 
-# =============================================================================
-# Scenario 2: MSFT "Q2 25" → Q2 FY2025 (Oct–Dec 2024)
-# MSFT FY ends June. CY Q2 2025 = Apr–Jun 2025 (target Jun 30).
-# Closest: Q4 FY2025 (Apr–Jun 2025, period_end Jun 30).
-# Transcript says "Q4" but user said "Q2". Big mismatch.
-# =============================================================================
 SCENARIO_2 = {
     "name": "MSFT Q2 25 — FY ends June, quarter number mismatch",
     "query": "MSFT Q2 25 revenue",
@@ -117,9 +109,12 @@ SCENARIO_2 = {
             ),
             "similarity": 0.91,
             "metadata": {
-                "company_ticker": "MSFT", "company_name": "Microsoft",
-                "call_date": "2025-07-22", "fiscal_quarter": "Q4 FY2025",
-                "period_end": "2025-06-30", "chunk_type": "financials",
+                "company_ticker": "MSFT",
+                "company_name": "Microsoft",
+                "call_date": "2025-07-22",
+                "fiscal_quarter": "Q4 FY2025",
+                "period_end": "2025-06-30",
+                "chunk_type": "financials",
             },
         },
         {
@@ -132,24 +127,23 @@ SCENARIO_2 = {
             ),
             "similarity": 0.84,
             "metadata": {
-                "company_ticker": "MSFT", "company_name": "Microsoft",
-                "call_date": "2025-07-22", "fiscal_quarter": "Q4 FY2025",
+                "company_ticker": "MSFT",
+                "company_name": "Microsoft",
+                "call_date": "2025-07-22",
+                "fiscal_quarter": "Q4 FY2025",
                 "period_end": "2025-06-30",
             },
         },
     ],
 }
 
-# =============================================================================
-# Scenario 3: NOW vs CRM "Q4 25" — cross-company, different fiscal calendars
-# NOW (FY ends Dec) Q4 FY2025 = Oct–Dec 2025, period_end Dec 31
-# CRM (FY ends Jan) Q4 FY2026 = Nov–Jan 2026, period_end Jan 31
-# Both are closest to CY Q4 2025 target (Dec 31) but cover different months.
-# =============================================================================
 SCENARIO_3 = {
     "name": "NOW vs CRM Q4 25 — cross-company fiscal calendar mismatch",
     "query": "Compare ServiceNow and Salesforce Q4 25 revenue",
-    "expected": "Should compare NOW Q4 FY2025 (Oct–Dec 2025) vs CRM Q4 FY2026 (Nov–Jan 2026), noting the different periods",
+    "expected": (
+        "Should compare NOW Q4 FY2025 (Oct–Dec 2025) vs CRM Q4 FY2026 (Nov–Jan 2026), "
+        "noting the different periods"
+    ),
     "available_periods": {
         "NOW": [
             {"call_date": "2026-01-29", "fiscal_quarter": "Q4 FY2025", "period_end": "2025-12-31"},
@@ -177,9 +171,12 @@ SCENARIO_3 = {
             ),
             "similarity": 0.90,
             "metadata": {
-                "company_ticker": "NOW", "company_name": "ServiceNow",
-                "call_date": "2026-01-29", "fiscal_quarter": "Q4 FY2025",
-                "period_end": "2025-12-31", "chunk_type": "financials",
+                "company_ticker": "NOW",
+                "company_name": "ServiceNow",
+                "call_date": "2026-01-29",
+                "fiscal_quarter": "Q4 FY2025",
+                "period_end": "2025-12-31",
+                "chunk_type": "financials",
             },
         },
         {
@@ -193,19 +190,17 @@ SCENARIO_3 = {
             ),
             "similarity": 0.89,
             "metadata": {
-                "company_ticker": "CRM", "company_name": "Salesforce",
-                "call_date": "2026-03-05", "fiscal_quarter": "Q4 FY2026",
-                "period_end": "2026-01-31", "chunk_type": "financials",
+                "company_ticker": "CRM",
+                "company_name": "Salesforce",
+                "call_date": "2026-03-05",
+                "fiscal_quarter": "Q4 FY2026",
+                "period_end": "2026-01-31",
+                "chunk_type": "financials",
             },
         },
     ],
 }
 
-# =============================================================================
-# Scenario 4: IOT "latest revenue" — latest quarter, no specific time
-# IOT FY ends January. Latest = Q4 FY2026 (Nov 2025–Jan 2026)
-# Transcript says "Q4 revenue" — user didn't specify a quarter at all.
-# =============================================================================
 SCENARIO_4 = {
     "name": "IOT latest revenue — no time specified, latest quarter",
     "query": "Samsara revenue",
@@ -234,23 +229,24 @@ SCENARIO_4 = {
             ),
             "similarity": 0.93,
             "metadata": {
-                "company_ticker": "IOT", "company_name": "Samsara",
-                "call_date": "2026-03-06", "fiscal_quarter": "Q4 FY2026",
-                "period_end": "2026-01-31", "chunk_type": "financials",
+                "company_ticker": "IOT",
+                "company_name": "Samsara",
+                "call_date": "2026-03-06",
+                "fiscal_quarter": "Q4 FY2026",
+                "period_end": "2026-01-31",
+                "chunk_type": "financials",
             },
         },
     ],
 }
 
-# =============================================================================
-# Scenario 5: PANW "last 4 quarters" — range query, FY ends July
-# Mixed fiscal labels: Q1 FY2026, Q4 FY2025, Q3 FY2025, Q2 FY2025
-# User just says "last 4 quarters", transcript uses all different FQ labels.
-# =============================================================================
 SCENARIO_5 = {
     "name": "PANW last 4 quarters — range query, FY ends July",
     "query": "Palo Alto Networks revenue last 4 quarters",
-    "expected": "Should list 4 quarters of revenue in reverse chronological order with fiscal labels + calendar periods",
+    "expected": (
+        "Should list 4 quarters of revenue in reverse chronological order with fiscal labels + "
+        "calendar periods"
+    ),
     "available_periods": {
         "PANW": [
             {"call_date": "2025-11-20", "fiscal_quarter": "Q1 FY2026", "period_end": "2025-10-31"},
@@ -262,8 +258,10 @@ SCENARIO_5 = {
     "scope": SimpleRAGScope(
         tickers=["PANW"],
         ticker_date_pairs=[
-            ("PANW", "2025-11-20"), ("PANW", "2025-08-19"),
-            ("PANW", "2025-05-20"), ("PANW", "2025-02-20"),
+            ("PANW", "2025-11-20"),
+            ("PANW", "2025-08-19"),
+            ("PANW", "2025-05-20"),
+            ("PANW", "2025-02-20"),
         ],
         temporal_intent=TemporalIntent(type="range", num_quarters=4),
     ),
@@ -278,9 +276,12 @@ SCENARIO_5 = {
             ),
             "similarity": 0.91,
             "metadata": {
-                "company_ticker": "PANW", "company_name": "Palo Alto Networks",
-                "call_date": "2025-11-20", "fiscal_quarter": "Q1 FY2026",
-                "period_end": "2025-10-31", "chunk_type": "financials",
+                "company_ticker": "PANW",
+                "company_name": "Palo Alto Networks",
+                "call_date": "2025-11-20",
+                "fiscal_quarter": "Q1 FY2026",
+                "period_end": "2025-10-31",
+                "chunk_type": "financials",
             },
         },
         {
@@ -293,9 +294,12 @@ SCENARIO_5 = {
             ),
             "similarity": 0.89,
             "metadata": {
-                "company_ticker": "PANW", "company_name": "Palo Alto Networks",
-                "call_date": "2025-08-19", "fiscal_quarter": "Q4 FY2025",
-                "period_end": "2025-07-31", "chunk_type": "financials",
+                "company_ticker": "PANW",
+                "company_name": "Palo Alto Networks",
+                "call_date": "2025-08-19",
+                "fiscal_quarter": "Q4 FY2025",
+                "period_end": "2025-07-31",
+                "chunk_type": "financials",
             },
         },
         {
@@ -308,9 +312,12 @@ SCENARIO_5 = {
             ),
             "similarity": 0.87,
             "metadata": {
-                "company_ticker": "PANW", "company_name": "Palo Alto Networks",
-                "call_date": "2025-05-20", "fiscal_quarter": "Q3 FY2025",
-                "period_end": "2025-04-30", "chunk_type": "financials",
+                "company_ticker": "PANW",
+                "company_name": "Palo Alto Networks",
+                "call_date": "2025-05-20",
+                "fiscal_quarter": "Q3 FY2025",
+                "period_end": "2025-04-30",
+                "chunk_type": "financials",
             },
         },
         {
@@ -323,9 +330,12 @@ SCENARIO_5 = {
             ),
             "similarity": 0.85,
             "metadata": {
-                "company_ticker": "PANW", "company_name": "Palo Alto Networks",
-                "call_date": "2025-02-20", "fiscal_quarter": "Q2 FY2025",
-                "period_end": "2025-01-31", "chunk_type": "financials",
+                "company_ticker": "PANW",
+                "company_name": "Palo Alto Networks",
+                "call_date": "2025-02-20",
+                "fiscal_quarter": "Q2 FY2025",
+                "period_end": "2025-01-31",
+                "chunk_type": "financials",
             },
         },
     ],
@@ -351,7 +361,9 @@ async def run_scenario(scenario: dict, client, settings) -> tuple[str, str]:
     )
 
     llm_query = rewrite_query_for_answer_llm(
-        scenario["query"], scenario["scope"], scenario["available_periods"],
+        scenario["query"],
+        scenario["scope"],
+        scenario["available_periods"],
     )
 
     input_messages = [
@@ -377,7 +389,6 @@ async def main():
         print(f"EXPECTED: {scenario['expected']}")
         print("-" * 80)
 
-        # Show resolution note
         note = build_resolution_note(scenario["scope"], scenario["available_periods"])
         print(f"RESOLUTION NOTE:\n{note}")
         print("-" * 80)

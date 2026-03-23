@@ -123,15 +123,18 @@ async def append_conversation_turn(
     await append_conversation_messages(session_id, [request, response], user_id=user_id)
 
 
-async def list_sessions(user_id: str | None = None) -> list[tuple[str, object]]:
-    """List conversation session IDs with their last activity time.
+async def list_sessions(user_id: str | None = None) -> list[tuple[str, object, str | None]]:
+    """List conversation session IDs with their last activity time and title.
 
     If user_id is provided, returns only sessions belonging to that user.
 
     Returns:
-        List of (session_id, updated_at) tuples, newest first.
+        List of (session_id, updated_at, title) tuples, newest first.
+        Title is derived from the first user message in the session.
     """
     import uuid as _uuid
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
     async with get_session() as session:
         q = select(
             ConversationMessage.session_id,
@@ -146,7 +149,53 @@ async def list_sessions(user_id: str | None = None) -> list[tuple[str, object]]:
                 subq.c.updated_at.desc().nulls_last()
             )
         )
-        return list(result.all())
+        rows = list(result.all())
+        session_ids = [r[0] for r in rows]
+
+        if not session_ids:
+            return []
+
+        # Fetch first request message per session for titles
+        first_msgs_q = (
+            select(
+                ConversationMessage.session_id,
+                ConversationMessage.content,
+            )
+            .where(
+                ConversationMessage.session_id.in_(session_ids),
+                ConversationMessage.role == "request",
+            )
+            .distinct(ConversationMessage.session_id)
+            .order_by(
+                ConversationMessage.session_id,
+                nulls_last(ConversationMessage.position.asc()),
+                ConversationMessage.created_at.asc(),
+                ConversationMessage.id.asc(),
+            )
+        )
+        first_msgs_result = await session.execute(first_msgs_q)
+        first_msgs = {r[0]: r[1] for r in first_msgs_result.all()}
+
+    def _extract_title(content: object) -> str | None:
+        if not content:
+            return None
+        try:
+            msgs = _deserialize_message(content)
+            for msg in msgs:
+                if isinstance(msg, ModelRequest):
+                    for part in msg.parts:
+                        if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+                            text = part.content.strip()
+                            if text:
+                                return text[:100]
+        except Exception:
+            pass
+        return None
+
+    return [
+        (sid, updated_at, _extract_title(first_msgs.get(sid)))
+        for sid, updated_at in rows
+    ]
 
 
 async def delete_session(session_id: str) -> None:

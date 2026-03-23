@@ -22,6 +22,7 @@ class SessionSummary(BaseModel):
 
     session_id: str = Field(..., description="Session ID")
     updated_at: datetime | None = Field(None, description="Last activity time")
+    title: str | None = Field(None, description="Chat title from first user message")
 
 
 class HistoryEntry(BaseModel):
@@ -37,8 +38,8 @@ async def get_sessions(user: dict = Depends(require_user)):
     """List conversation sessions for the authenticated user, newest first."""
     rows = await list_sessions(user_id=user["sub"])
     return [
-        SessionSummary(session_id=session_id, updated_at=updated_at)
-        for session_id, updated_at in rows
+        SessionSummary(session_id=session_id, updated_at=updated_at, title=title)
+        for session_id, updated_at, title in rows
     ]
 
 

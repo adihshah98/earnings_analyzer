@@ -70,13 +70,6 @@ def _print_results(result: dict) -> None:
     for metric, score in result.get("overall_scores", {}).items():
         bar = "█" * int(score * 20) + "░" * (20 - int(score * 20))
         print(f"  {metric:25s} {bar} {score:.3f}")
-    print("\nPer-case Results (sample):")
-    for cr in result.get("case_results", [])[:5]:
-        scores_str = ", ".join(f"{s['name']}={s['score']:.2f}" for s in cr.get("scores", []))
-        print(f"  Q: {cr['query'][:60]}...")
-        print(f"     {scores_str} ({cr.get('latency_ms', 0):.0f}ms)")
-    if len(result.get("case_results", [])) > 5:
-        print(f"  ... and {len(result['case_results']) - 5} more")
 
 
 async def main() -> None:

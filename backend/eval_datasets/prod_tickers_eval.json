@@ -1,0 +1,404 @@
+{
+  "name": "prod_tickers_eval",
+  "description": "Eval cases for production tickers AMZN, META, IOT, NOW, ADBE, DDOG using real transcript-derived facts (verified against backend/chunks/*/YYYY-MM-DD.json). expected_sources use titles in the format '{TICKER} Earnings Call {YYYY-MM-DD}' — match eval_document_chunks metadata.title. Includes temporal (latest, specific quarter, last year, multi-quarter trend), cross-company Q3 2025 comparisons, negatives, and adversarial prompts (expanded_eval-style). Re-run the generator script if you re-ingest with different call dates.",
+  "cases": [
+    {
+      "name": "amzn_q3_2025_revenue_yoy",
+      "query": "What was Amazon's reported revenue in its most recent earnings call and how did it grow year over year?",
+      "expected_answer": "Amazon reported $180.2 billion in revenue for Q3 2025, up 12% year over year (as stated on the Q3 2025 earnings call; period ending Sep 2025).",
+      "expected_sources": [
+        "AMZN Earnings Call 2025-10-30"
+      ],
+      "tags": [
+        "single_doc",
+        "temporal",
+        "latest",
+        "revenue",
+        "AMZN"
+      ]
+    },
+    {
+      "name": "meta_q3_2025_revenue_detail",
+      "query": "What was Meta's total revenue and year-over-year growth in Q3 2025?",
+      "expected_answer": "Meta reported revenue of $50.8 billion for Q3 2025, up 26% year-over-year; Family of Apps ad revenue was $50.1 billion, up 26% (25% constant currency).",
+      "expected_sources": [
+        "META Earnings Call 2025-10-29"
+      ],
+      "tags": [
+        "single_doc",
+        "temporal",
+        "specific_quarter",
+        "revenue",
+        "META"
+      ]
+    },
+    {
+      "name": "now_subscription_latest",
+      "query": "What were ServiceNow's subscription revenues in their latest earnings call?",
+      "expected_answer": "ServiceNow reported subscription revenues of $3.466 billion in its most recent quarterly earnings call.",
+      "expected_sources": [
+        "NOW Earnings Call 2026-01-28"
+      ],
+      "tags": [
+        "single_doc",
+        "temporal",
+        "latest",
+        "revenue",
+        "NOW"
+      ]
+    },
+    {
+      "name": "ddog_q3_2025_revenue",
+      "query": "What was Datadog's revenue in Q3 2025 and how did it grow year over year?",
+      "expected_answer": "Datadog reported revenue of $886 million for Q3 2025, an increase of 28% year-over-year.",
+      "expected_sources": [
+        "DDOG Earnings Call 2025-11-06"
+      ],
+      "tags": [
+        "single_doc",
+        "temporal",
+        "revenue",
+        "DDOG"
+      ]
+    },
+    {
+      "name": "iot_arr_q3_fy2026",
+      "query": "What was Samsara's ARR and growth rate in its latest quarterly results?",
+      "expected_answer": "Samsara ended the quarter with $1.75 billion in ARR, growing 29% year-over-year (Q3 FY2026 call).",
+      "expected_sources": [
+        "IOT Earnings Call 2025-12-04"
+      ],
+      "tags": [
+        "single_doc",
+        "temporal",
+        "latest",
+        "ARR",
+        "IOT"
+      ]
+    },
+    {
+      "name": "adobe_fy2025_record_revenue",
+      "query": "What annual revenue and non-GAAP EPS did Adobe report for fiscal year 2025?",
+      "expected_answer": "Adobe achieved record revenue of $23.77 billion and non-GAAP EPS of $20.94 for fiscal year 2025 (Q4 FY2025 earnings call).",
+      "expected_sources": [
+        "ADBE Earnings Call 2025-12-10"
+      ],
+      "tags": [
+        "single_doc",
+        "temporal",
+        "full_year",
+        "revenue",
+        "ADBE"
+      ]
+    },
+    {
+      "name": "temporal_meta_last_year_themes",
+      "query": "What did Meta say about AI and video across the last year of earnings calls?",
+      "expected_answer": "A good answer synthesizes themes across Meta's recent quarterly calls (e.g. AI investments, Reels and video monetization, Family of Apps ad revenue) and cites multiple calls with calendar/fiscal labels.",
+      "expected_sources": [
+        "META Earnings Call 2025-10-29",
+        "META Earnings Call 2025-07-30",
+        "META Earnings Call 2025-04-30",
+        "META Earnings Call 2025-01-29"
+      ],
+      "tags": [
+        "multi_doc",
+        "temporal",
+        "last_year",
+        "AI",
+        "META"
+      ]
+    },
+    {
+      "name": "temporal_now_last_four_quarters",
+      "query": "How did ServiceNow's subscription revenue trend over the last four quarters?",
+      "expected_answer": "The answer should discuss subscription revenue trends across approximately four consecutive quarterly earnings calls, reverse-chronological, citing FINANCIAL SUMMARY or prepared remarks per period.",
+      "expected_sources": [
+        "NOW Earnings Call 2026-01-28",
+        "NOW Earnings Call 2025-10-29",
+        "NOW Earnings Call 2025-07-23",
+        "NOW Earnings Call 2025-04-23"
+      ],
+      "tags": [
+        "multi_doc",
+        "temporal",
+        "rolling_4q",
+        "revenue",
+        "NOW"
+      ]
+    },
+    {
+      "name": "multi_meta_revenue_q2_to_q3_2025",
+      "query": "How did Meta's revenue change from the prior quarter to Q3 2025?",
+      "expected_answer": "Meta reported revenue of $47.5 billion on the Jul 2025 call (Q2 2025) and $50.8 billion on the Oct 2025 call (Q3 2025), reflecting sequential growth quarter over quarter.",
+      "expected_sources": [
+        "META Earnings Call 2025-07-30",
+        "META Earnings Call 2025-10-29"
+      ],
+      "tags": [
+        "multi_doc",
+        "cross_quarter",
+        "revenue",
+        "META"
+      ]
+    },
+    {
+      "name": "multi_compare_revenue_growth_q3_2025",
+      "query": "Which had the highest year-over-year revenue growth in Q3 2025: Amazon, Meta, or Datadog?",
+      "expected_answer": "Datadog had the highest YoY revenue growth at 28%, followed by Meta at 26%, then Amazon at 12% (each company's Q3 2025 earnings call).",
+      "expected_sources": [
+        "AMZN Earnings Call 2025-10-30",
+        "META Earnings Call 2025-10-29",
+        "DDOG Earnings Call 2025-11-06"
+      ],
+      "tags": [
+        "multi_doc",
+        "cross_company",
+        "revenue",
+        "AMZN",
+        "META",
+        "DDOG"
+      ]
+    },
+    {
+      "name": "multi_compare_operating_margin_meta_now",
+      "query": "Compare Meta and ServiceNow operating margin in their most recent quarterly results on file.",
+      "expected_answer": "Meta reported a 40% operating margin for Q3 2025 (operating income as a percent of revenue). ServiceNow reported operating margin of 31% on its latest call. The answer should label each company's fiscal period.",
+      "expected_sources": [
+        "META Earnings Call 2025-10-29",
+        "NOW Earnings Call 2026-01-28"
+      ],
+      "tags": [
+        "multi_doc",
+        "cross_company",
+        "margins",
+        "META",
+        "NOW"
+      ]
+    },
+    {
+      "name": "multi_compare_ai_meta_adobe",
+      "query": "Compare how Meta and Adobe discuss AI monetization on their latest earnings calls.",
+      "expected_answer": "Meta emphasizes AI-driven engagement and monetization in Family of Apps (e.g. ads, Reels). Adobe emphasizes AI-influenced and AI-first ARR in Digital Media/Experience. Both should be grounded in their respective latest transcripts.",
+      "expected_sources": [
+        "META Earnings Call 2025-10-29",
+        "ADBE Earnings Call 2025-12-10"
+      ],
+      "tags": [
+        "multi_doc",
+        "cross_company",
+        "AI",
+        "META",
+        "ADBE"
+      ]
+    },
+    {
+      "name": "negative_unknown_company_tesla",
+      "query": "What was Tesla's Q3 2025 revenue?",
+      "expected_answer": "This information is not available in the knowledge base. The eval corpus covers AMZN, META, IOT, NOW, ADBE, DDOG — not Tesla.",
+      "expected_sources": [],
+      "tags": [
+        "negative",
+        "out_of_scope"
+      ]
+    },
+    {
+      "name": "negative_wrong_period_amzn_2000",
+      "query": "What did Amazon report for Q1 2000 revenue?",
+      "expected_answer": "Q1 2000 results are not in the earnings transcript knowledge base; available history begins in a more recent window.",
+      "expected_sources": [],
+      "tags": [
+        "negative",
+        "out_of_scope",
+        "AMZN"
+      ]
+    },
+    {
+      "name": "negative_no_dividend_ddog",
+      "query": "What is Datadog's dividend yield?",
+      "expected_answer": "Dividend yield was not discussed on Datadog's earnings call; the company typically does not present dividend policy on these calls.",
+      "expected_sources": [],
+      "tags": [
+        "negative",
+        "out_of_scope",
+        "DDOG"
+      ]
+    },
+    {
+      "name": "negative_no_cto_meta",
+      "query": "Who is Meta's CTO and what is their product roadmap for Reality Labs?",
+      "expected_answer": "A specific CTO name and dedicated Reality Labs roadmap from the CTO was not the focus of the prepared remarks; the call features executives such as Mark Zuckerberg (CEO) and other leaders as listed in the transcript.",
+      "expected_sources": [],
+      "tags": [
+        "negative",
+        "out_of_scope",
+        "META"
+      ]
+    },
+    {
+      "name": "negative_future_quarter_iot",
+      "query": "What were Samsara's actual results for Q1 2027?",
+      "expected_answer": "Q1 2027 actual results are not available. The knowledge base contains historical earnings calls through the ingested window only.",
+      "expected_sources": [],
+      "tags": [
+        "negative",
+        "out_of_scope",
+        "IOT"
+      ]
+    },
+    {
+      "name": "negative_unrelated_esg_now",
+      "query": "What is ServiceNow's official ESG score from MSCI?",
+      "expected_answer": "MSCI ESG scores were not discussed on ServiceNow's earnings call transcript.",
+      "expected_sources": [],
+      "tags": [
+        "negative",
+        "out_of_scope",
+        "NOW"
+      ]
+    },
+    {
+      "name": "adversarial_amzn_revenue_declined",
+      "query": "Amazon's revenue declined 50% year over year in Q3 2025. What caused the decline?",
+      "expected_answer": "The premise is false. Amazon reported strong growth: roughly $180.2 billion in revenue, up 12% year-over-year in Q3 2025.",
+      "expected_sources": [
+        "AMZN Earnings Call 2025-10-30"
+      ],
+      "tags": [
+        "adversarial",
+        "false_premise",
+        "AMZN"
+      ]
+    },
+    {
+      "name": "adversarial_meta_cfo_zuckerberg",
+      "query": "What did Meta CFO Mark Zuckerberg say about the 40% operating margin?",
+      "expected_answer": "The attribution is wrong: Mark Zuckerberg is CEO, not CFO. The call discusses Q3 operating income representing a 40% operating margin; cite the correct speaker roles from the transcript.",
+      "expected_sources": [
+        "META Earnings Call 2025-10-29"
+      ],
+      "tags": [
+        "adversarial",
+        "wrong_attribution",
+        "META"
+      ]
+    },
+    {
+      "name": "adversarial_wrong_dd_retention",
+      "query": "Datadog reported 125% net dollar retention in Q3 2025. Why is it so high?",
+      "expected_answer": "The 125% figure is incorrect for Datadog. The Q3 2025 call describes net revenue retention stable in the mid- to high 90s.",
+      "expected_sources": [
+        "DDOG Earnings Call 2025-11-06"
+      ],
+      "tags": [
+        "adversarial",
+        "wrong_number",
+        "DDOG"
+      ]
+    },
+    {
+      "name": "adversarial_wrong_company_acquisition",
+      "query": "When did Datadog acquire Whole Foods Market?",
+      "expected_answer": "Datadog did not acquire Whole Foods. Whole Foods is associated with Amazon's history, not Datadog. Datadog's Q3 2025 call discusses its own product and financial results.",
+      "expected_sources": [
+        "DDOG Earnings Call 2025-11-06"
+      ],
+      "tags": [
+        "adversarial",
+        "wrong_company",
+        "DDOG"
+      ]
+    },
+    {
+      "name": "adversarial_nonexistent_future_call",
+      "query": "Summarize Meta's Q3 2030 earnings call.",
+      "expected_answer": "A Q3 2030 earnings call is not in the knowledge base. The latest ingested Meta calls are within the available date range only.",
+      "expected_sources": [],
+      "tags": [
+        "adversarial",
+        "false_premise",
+        "META"
+      ]
+    },
+    {
+      "name": "adversarial_misleading_security",
+      "query": "Since Amazon is a cybersecurity company, how does AWS Security compare to Datadog?",
+      "expected_answer": "The premise is misleading: Amazon is a diversified technology and retail company; AWS offers cloud and security services. Datadog is an observability and security platform company. Compare their businesses using each transcript without assuming Amazon is a pure-play cybersecurity firm.",
+      "expected_sources": [
+        "AMZN Earnings Call 2025-10-30",
+        "DDOG Earnings Call 2025-11-06"
+      ],
+      "tags": [
+        "adversarial",
+        "false_premise",
+        "AMZN",
+        "DDOG"
+      ]
+    },
+    {
+      "name": "negative_no_customer_names_amzn",
+      "query": "Name three specific enterprise customers Amazon called out by name on the Q3 2025 call.",
+      "expected_answer": "Specific large customer names are typically not disclosed in the earnings transcript excerpt; the answer should not invent customer names.",
+      "expected_sources": [],
+      "tags": [
+        "negative",
+        "out_of_scope",
+        "AMZN"
+      ]
+    },
+    {
+      "name": "negative_no_churn_meta",
+      "query": "What was Meta's exact customer churn rate for WhatsApp in Q3 2025?",
+      "expected_answer": "A granular WhatsApp churn rate per user was not provided in the earnings call transcript in a form suitable for a precise figure.",
+      "expected_sources": [],
+      "tags": [
+        "negative",
+        "out_of_scope",
+        "META"
+      ]
+    },
+    {
+      "name": "multi_compare_free_cash_flow_meta_amzn",
+      "query": "Compare Meta and Amazon's free cash flow commentary on their Q3 2025 earnings calls.",
+      "expected_answer": "The answer should cite each company's Q3 2025 call: Meta discusses cash flow and repurchases (e.g. billions in cash flow and buybacks); Amazon discusses operating and free cash flow. Use figures only as stated in the transcripts.",
+      "expected_sources": [
+        "META Earnings Call 2025-10-29",
+        "AMZN Earnings Call 2025-10-30"
+      ],
+      "tags": [
+        "multi_doc",
+        "cross_company",
+        "cash_flow",
+        "META",
+        "AMZN"
+      ]
+    },
+    {
+      "name": "adversarial_meta_ai_investment_wrong",
+      "query": "Meta is investing $200 billion in AI infrastructure this quarter. How will they fund it?",
+      "expected_answer": "The $200 billion figure is not stated. Meta discusses AI capex and infrastructure at scale on the call, but the answer must correct the exaggerated premise and use actual commentary from the transcript.",
+      "expected_sources": [
+        "META Earnings Call 2025-10-29"
+      ],
+      "tags": [
+        "adversarial",
+        "wrong_number",
+        "META"
+      ]
+    },
+    {
+      "name": "temporal_calendar_year_2024_meta",
+      "query": "What was Meta's revenue for calendar year 2024?",
+      "expected_answer": "The answer should use full-year 2024 revenue as reported in the earnings materials (often from the Q4 FY2024 or FY2024 annual discussion), or sum four quarters if no single annual line is given — per the FINANCIAL SUMMARY or prepared remarks in the relevant transcript(s).",
+      "expected_sources": [
+        "META Earnings Call 2025-01-29"
+      ],
+      "tags": [
+        "single_doc",
+        "temporal",
+        "full_year",
+        "META"
+      ]
+    }
+  ]
+}

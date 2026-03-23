@@ -40,6 +40,7 @@ export interface HistoryEntry {
 export interface ConversationSessionSummary {
   session_id: string
   updated_at: string | null
+  title: string | null
 }
 
 /** Backend conversation history entry (same shape as HistoryEntry) */

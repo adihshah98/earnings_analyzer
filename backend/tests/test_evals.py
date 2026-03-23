@@ -1,4 +1,4 @@
-"""Tests for the eval system."""
+"""Tests for `app.evals` datasets, schemas, and retrieval eval helpers."""
 
 import pytest
 
@@ -15,17 +15,17 @@ from app.models.schemas import EvalCase, EvalDataset, MetricScore
 
 
 class TestEvalDataset:
-    """Test eval dataset loading and validation."""
+    """Test eval dataset loading and validation (uses committed JSON under `eval_datasets/`)."""
+
+    _DATASET = "prod_tickers_eval"
 
     def test_load_transcript_dataset(self):
-        """Transcript eval dataset should load successfully."""
-        dataset = load_dataset("acme_eval")
-        assert dataset.name == "acme_eval"
+        dataset = load_dataset(self._DATASET)
+        assert dataset.name == self._DATASET
         assert len(dataset.cases) > 0
 
     def test_dataset_cases_valid(self):
-        """All cases should have required fields."""
-        dataset = load_dataset("acme_eval")
+        dataset = load_dataset(self._DATASET)
         for case in dataset.cases:
             query = case.inputs.get("query", "") if isinstance(case.inputs, dict) else ""
             tags = case.metadata.get("tags", []) if isinstance(case.metadata, dict) else []
@@ -33,27 +33,23 @@ class TestEvalDataset:
             assert len(tags) > 0
 
     def test_missing_dataset_raises(self):
-        """Loading a nonexistent dataset should raise FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
             load_dataset("nonexistent_dataset")
 
     def test_list_datasets(self):
-        """Should list available datasets."""
         datasets = list_datasets()
-        assert "acme_eval" in datasets
+        assert self._DATASET in datasets
 
     def test_load_dataset_with_tag_filter(self):
-        """Tag filter should restrict cases to those matching at least one tag."""
-        full = load_dataset("acme_eval")
-        filtered = load_dataset("acme_eval", tag_filter=["AI"])
+        full = load_dataset(self._DATASET)
+        filtered = load_dataset(self._DATASET, tag_filter=["AMZN"])
         assert len(filtered.cases) < len(full.cases)
         for case in filtered.cases:
             tags = case.metadata.get("tags", []) if isinstance(case.metadata, dict) else []
-            assert "AI" in tags
+            assert "AMZN" in tags
 
     def test_load_dataset_with_tag_filter_no_match(self):
-        """Tag filter with no matching tags should return empty cases."""
-        filtered = load_dataset("acme_eval", tag_filter=["nonexistent_tag_xyz"])
+        filtered = load_dataset(self._DATASET, tag_filter=["nonexistent_tag_xyz"])
         assert len(filtered.cases) == 0
 
 

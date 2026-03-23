@@ -325,7 +325,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         if (cancelled) return
         const chats: ChatSession[] = sessions.map((s) => ({
           id: s.session_id,
-          title: 'Chat',
+          title: s.title ? truncateTitle(s.title) : 'Chat',
           messages: [],
         }))
         const stored = loadFromStorage<StoredState>()
