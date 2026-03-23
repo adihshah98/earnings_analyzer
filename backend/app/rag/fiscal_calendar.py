@@ -144,6 +144,12 @@ def compute_cy_quarter_end(quarter: int, year: int) -> date:
     return date(year, end_month, last_day)
 
 
+def cy_quarter_label_from_period_end(period_end: date) -> str:
+    """Map a calendar quarter end date to a stable label, e.g. CY Q4 2024."""
+    q = (period_end.month - 1) // 3 + 1
+    return f"CY Q{q} {period_end.year}"
+
+
 def period_end_to_label(period_end: date) -> str:
     """Convert a period_end date to a human-readable calendar period label.
 

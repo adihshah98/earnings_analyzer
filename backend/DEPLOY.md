@@ -49,10 +49,11 @@ Migrations run automatically on container startup (`alembic upgrade head` before
 |----------|----------|-------|
 | `DATABASE_URL` | Yes | `postgresql+asyncpg://user:pass@host:5432/dbname` |
 | `OPENAI_API_KEY` | Yes | OpenAI API key |
-| `OPENAI_MODEL` | No | Default: `gpt-4o-mini` |
 | `EMBEDDING_MODEL` | No | Default: `text-embedding-3-small` |
 | `EMBEDDING_DIMENSIONS` | No | Default: `1536` |
 | `CORS_ORIGINS` | No | Comma-separated origins; default: `http://localhost:5173` |
 | `ADMIN_API_KEY` | No | For ingest/eval routes; empty = unprotected |
 | `LOG_LEVEL` | No | Default: `INFO` |
 | `PORT` | No | Port to bind; set by Railway/Cloud Run |
+
+Chat completions always use **`gpt-4.1-mini`** (`DEFAULT_OPENAI_MODEL` in `app/config.py`). The `OPENAI_MODEL` environment variable is ignored.

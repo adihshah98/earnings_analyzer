@@ -10,6 +10,7 @@ metric aliases) so retrieval covers different interpretations in one pass.
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -21,7 +22,11 @@ from cachetools import TTLCache
 from app.agents.prompt_utils import _sanitize_for_prompt
 from app.config import get_settings
 from app.rag.embeddings import get_openai_client
-from app.rag.fiscal_calendar import compute_cy_quarter_end, period_end_to_label
+from app.rag.fiscal_calendar import (
+    compute_cy_quarter_end,
+    cy_quarter_label_from_period_end,
+    period_end_to_label,
+)
 
 _tokenizer = tiktoken.encoding_for_model("gpt-4o-mini")
 
@@ -46,9 +51,14 @@ def _extract_text_from_responses_output(output: list) -> str:
 class TemporalIntent:
     """What the user meant temporally, as extracted by the LLM."""
     type: str = "unspecified"  # "latest" | "specific_quarter" | "range" | "unspecified"
-    quarter: int | None = None       # 1-4 (for specific_quarter)
-    year: int | None = None          # e.g. 2025
-    num_quarters: int | None = None  # for range queries
+    quarter: int | None = None         # 1-4 (for specific_quarter)
+    year: int | None = None            # e.g. 2025 (for specific_quarter)
+    # Range fields — anchored or rolling:
+    num_quarters: int | None = None    # rolling window ("last 8 quarters")
+    start_year: int | None = None      # anchor start year
+    start_quarter: int | None = None   # anchor start quarter (default Q1)
+    end_year: int | None = None        # anchor end year
+    end_quarter: int | None = None     # anchor end quarter (default Q4)
 
 
 @dataclass
@@ -80,6 +90,86 @@ def _strip_json_fences(text: str) -> str:
             text = text.lstrip()[4:]
         text = text.strip()
     return text
+
+
+# Matches a 4-digit year (2019-2030) that is NOT preceded by "Q1"–"Q4"
+_BARE_YEAR_RE = re.compile(
+    r"(?<![Qq]\d\s)(?<![Qq])\b(20[1-3]\d)\b"
+)
+# Matches "Q1 2024" style references — if present, the year is NOT bare
+_QUARTER_YEAR_RE = re.compile(r"[Qq][1-4]\s*(?:FY|CY)?\s*\d{2,4}", re.IGNORECASE)
+# "last year" / "past year" / … → rolling 4 calendar quarters (see _fix_last_year)
+_LAST_YEAR_PHRASE_RE = re.compile(
+    r"\b(?:"
+    r"(?:last|past|previous)\s+year|"
+    r"over\s+the\s+last\s+year|"
+    r"in\s+the\s+last\s+year|"
+    r"during\s+the\s+last\s+year"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _fix_bare_year(query: str, temporal: TemporalIntent) -> TemporalIntent:
+    """Override LLM temporal classification when the query contains a bare year.
+
+    If the user wrote "Meta 2024 revenue" the LLM may return "latest" or
+    "specific_quarter".  This function detects a year without an adjacent
+    quarter reference and forces the intent to an anchored range covering
+    all 4 quarters of that year.
+    """
+    if temporal.type == "range" and temporal.start_year is not None:
+        return temporal  # already correct
+
+    # Skip if the query has an explicit quarter reference like "Q3 2024"
+    if _QUARTER_YEAR_RE.search(query):
+        return temporal
+
+    m = _BARE_YEAR_RE.search(query)
+    if not m:
+        return temporal
+
+    year = int(m.group(1))
+    logger.info("[debug] _fix_bare_year: overriding %s → range(start_year=%d, end_year=%d)", temporal.type, year, year)
+    temporal.type = "range"
+    temporal.start_year = year
+    temporal.end_year = year
+    temporal.start_quarter = None
+    temporal.end_quarter = None
+    temporal.num_quarters = None
+    return temporal
+
+
+def _fix_last_year(
+    query: str,
+    conversation_context: list[str] | None,
+    temporal: TemporalIntent,
+) -> TemporalIntent:
+    """Map 'last year' / 'past year' / … to rolling 4 calendar quarters from today.
+
+    Skips when the current query names an explicit calendar year (bare year) or
+    quarter+year, so 'revenue in 2024' stays an anchored full-year range.
+    """
+    if _BARE_YEAR_RE.search(query) or _QUARTER_YEAR_RE.search(query):
+        return temporal
+
+    combined = " ".join([*(conversation_context or []), query])
+    if not _LAST_YEAR_PHRASE_RE.search(combined):
+        return temporal
+
+    logger.info(
+        "[debug] _fix_last_year: overriding %s → range(num_quarters=4, rolling CY)",
+        temporal.type,
+    )
+    temporal.type = "range"
+    temporal.num_quarters = 4
+    temporal.start_year = None
+    temporal.end_year = None
+    temporal.start_quarter = None
+    temporal.end_quarter = None
+    temporal.quarter = None
+    temporal.year = None
+    return temporal
 
 
 async def _resolve_scope_via_llm(
@@ -118,25 +208,38 @@ TICKERS:
 
 TEMPORAL SCOPE — classify as one of:
 - "latest": user wants the most recent quarter. This is the DEFAULT when no time period is mentioned but a financial metric is asked AND no prior conversation established a specific time period (e.g. "Samsara revenue" with no prior context → latest).
-- "specific_quarter": user references a specific quarter, e.g. "Q1 25", "Q4 FY2025", "Q3 2024"
-- "range": user wants multiple quarters, e.g. "last 8 quarters", "over the past 2 years", "revenue trend"
+- "specific_quarter": user references a specific quarter, e.g. "Q1 25", "Q4 FY2025", "Q3 2024". MUST have a quarter number.
+- "range": user wants data across multiple quarters. Use optional anchor fields to specify the window:
+    - IMPORTANT: A bare year WITHOUT a quarter (e.g. "Meta 2024 revenue", "Amazon capex for 2023", "revenue in 2024") is a FULL YEAR query — use range with start_year and end_year set to that year. Do NOT use "latest" or "specific_quarter" for these.
+    - If a specific year is mentioned (e.g. "in 2024", "for 2023"): set start_year and end_year to that year.
+    - If a year span is mentioned (e.g. "from 2021 to 2023"): set start_year and end_year.
+    - If a specific quarter start/end is mentioned (e.g. "from Q2 2022 to Q4 2023"): set start_year, start_quarter, end_year, end_quarter.
+    - If a rolling window from today (e.g. "last 8 quarters", "revenue trend"): set only num_quarters.
+    - Phrases "last year", "past year", "previous year", "over the last year" mean the LAST 4 CALENDAR QUARTERS rolling back from today — use range with ONLY num_quarters=4 (no start_year/end_year). Same as "last 4 quarters" in intent.
+    - start_quarter defaults to Q1, end_quarter defaults to Q4 when omitted.
 - "unspecified": genuinely no temporal reference AND not a specific metrics question (e.g. "tell me about Samsara", "what companies are available")
 
-TEMPORAL CARRYOVER: If the user's follow-up asks about a financial metric without specifying a time period, AND the prior conversation established a specific time period (e.g. "Q4 25"), carry that time period forward — do NOT default to "latest". Examples:
-- Prior: "ServiceNow Q4 25 revenue" → Follow-up: "what about their margins?" → carry forward specific_quarter Q4 2025
-- Prior: "Samsara last 8 quarters revenue" → Follow-up: "and their gross margin?" → carry forward range num_quarters=8
+TEMPORAL CARRYOVER: If the user's follow-up asks about a financial metric without specifying a time period, AND the prior conversation established a specific time period (e.g. "Q4 25"), carry that time period forward — but ONLY if the follow-up is about the SAME company. When the user switches to a DIFFERENT company, do NOT carry forward the prior time period — use "latest" instead. Examples:
+- Prior: "ServiceNow Q4 25 revenue" → Follow-up: "what about their margins?" → SAME company, carry forward specific_quarter Q4 2025
+- Prior: "Samsara last 8 quarters revenue" → Follow-up: "and their gross margin?" → SAME company, carry forward range num_quarters=8
 - Prior: "tell me about Samsara" → Follow-up: "what's their revenue?" → no prior time period, use "latest"
+- Prior: "Samsara Q1 25 revenue" → Follow-up: "ServiceNow revenue" → DIFFERENT company, do NOT carry forward, use "latest"
+- Prior: "Amazon capex for 2024" → Follow-up: "what about their revenue?" → SAME company, carry forward range start_year=2024, end_year=2024
 
 For specific_quarter:
 - Extract quarter (1-4) and year (4-digit)
 - Always interpret as calendar year — "Q1 25", "Q1 FY25", "Q1 CY25" all mean CY Q1 2025 (Jan–Mar 2025)
 For range:
-- Extract num_quarters (e.g. 8 for "last 8 quarters", 4 for "last year", 20 for "last 5 years")
+- Anchored: set start_year/end_year (and optionally start_quarter/end_quarter)
+- Rolling: set num_quarters only (counts back from today)
 
 Reply with only JSON:
 {{"tickers": ["TICKER1"], "temporal": {{"type": "latest"}}}}
 {{"tickers": ["NOW", "CRM"], "temporal": {{"type": "specific_quarter", "quarter": 4, "year": 2025}}}}
 {{"tickers": ["NOW"], "temporal": {{"type": "range", "num_quarters": 8}}}}
+{{"tickers": ["AMZN"], "temporal": {{"type": "range", "start_year": 2024, "end_year": 2024}}}}
+{{"tickers": ["AMZN"], "temporal": {{"type": "range", "start_year": 2021, "end_year": 2023}}}}
+{{"tickers": ["META"], "temporal": {{"type": "range", "start_quarter": 2, "start_year": 2022, "end_quarter": 4, "end_year": 2023}}}}
 
 User query: {resolution_query}"""
 
@@ -172,10 +275,20 @@ User query: {resolution_query}"""
             quarter=temporal_data.get("quarter"),
             year=temporal_data.get("year"),
             num_quarters=temporal_data.get("num_quarters"),
+            start_year=temporal_data.get("start_year"),
+            start_quarter=temporal_data.get("start_quarter"),
+            end_year=temporal_data.get("end_year"),
+            end_quarter=temporal_data.get("end_quarter"),
         )
-        # Normalize 2-digit year
-        if temporal.year and temporal.year < 100:
-            temporal.year += 2000
+        # Normalize 2-digit years
+        for attr in ("year", "start_year", "end_year"):
+            v = getattr(temporal, attr)
+            if v and v < 100:
+                setattr(temporal, attr, v + 2000)
+
+        # Code-level override: if query contains a bare year (no quarter), force range
+        temporal = _fix_bare_year(query, temporal)
+        temporal = _fix_last_year(query, conversation_context, temporal)
 
         logger.info("[debug] scope resolution: query=%r → tickers=%s, temporal=%s", query, tickers, temporal)
         return tickers, temporal
@@ -219,6 +332,8 @@ def _resolve_temporal(
             ticker_periods = available_periods.get(t, [])
             if ticker_periods:
                 pairs.append((t, ticker_periods[0]["call_date"]))  # sorted desc
+        if pairs:
+            logger.info("[debug] temporal resolution: latest → (ticker, call_date): %s", pairs)
         return pairs or None
 
     if temporal.type == "specific_quarter":
@@ -228,6 +343,10 @@ def _resolve_temporal(
 
         # Always resolve as calendar year quarter
         target_end = compute_cy_quarter_end(temporal.quarter, year)
+        logger.info(
+            "[debug] temporal resolution: specific_quarter CY target: %s",
+            cy_quarter_label_from_period_end(target_end),
+        )
 
         pairs = []
         for t in tickers:
@@ -241,13 +360,68 @@ def _resolve_temporal(
         return pairs or None
 
     if temporal.type == "range":
-        n = temporal.num_quarters or 4
-        pairs = []
+        # Unified range: anchored (start/end year+quarter) or rolling (num_quarters).
+        is_anchored = temporal.start_year is not None or temporal.end_year is not None
+
+        if is_anchored:
+            # Anchored range — enumerate CY quarters between start and end
+            s_year = temporal.start_year or temporal.end_year or today.year
+            e_year = temporal.end_year or temporal.start_year or today.year
+            s_quarter = temporal.start_quarter or 1
+            e_quarter = temporal.end_quarter or 4
+
+            cy_targets: list[date] = []
+            cur_q, cur_y = s_quarter, s_year
+            while (cur_y, cur_q) <= (e_year, e_quarter):
+                cy_targets.append(compute_cy_quarter_end(cur_q, cur_y))
+                cur_q += 1
+                if cur_q > 4:
+                    cur_q = 1
+                    cur_y += 1
+        else:
+            # Rolling range — count back from most recently completed CY quarter
+            n = temporal.num_quarters or 4
+            cy_targets: list[date] = []
+            cur_q = (today.month - 1) // 3 + 1
+            cur_y = today.year
+            if compute_cy_quarter_end(cur_q, cur_y) > today:
+                cur_q -= 1
+                if cur_q < 1:
+                    cur_q = 4
+                    cur_y -= 1
+            for _ in range(n):
+                cy_targets.append(compute_cy_quarter_end(cur_q, cur_y))
+                cur_q -= 1
+                if cur_q < 1:
+                    cur_q = 4
+                    cur_y -= 1
+
+        cy_labels = [cy_quarter_label_from_period_end(d) for d in cy_targets]
+        logger.info(
+            "[debug] temporal resolution: range (%s) CY quarter targets: %s",
+            "anchored" if is_anchored else "rolling",
+            cy_labels,
+        )
+
+        pairs: list[tuple[str, str, str]] = []  # (ticker, call_date, period_end)
         for t in tickers:
             ticker_periods = available_periods.get(t, [])
-            for p in ticker_periods[:n]:
-                pairs.append((t, p["call_date"]))
-        return pairs or None
+            if not ticker_periods:
+                continue
+            seen_call_dates: set[str] = set()
+            for target_end in cy_targets:
+                closest = _find_closest_period(ticker_periods, target_end)
+                if closest and closest["call_date"] not in seen_call_dates:
+                    pairs.append((t, closest["call_date"], closest.get("period_end", "")))
+                    seen_call_dates.add(closest["call_date"])
+        pairs.sort(key=lambda p: p[2], reverse=True)
+        resolved_pairs = [(t, cd) for t, cd, _ in pairs]
+        if resolved_pairs:
+            logger.info(
+                "[debug] temporal resolution: range → resolved (ticker, call_date): %s",
+                resolved_pairs,
+            )
+        return resolved_pairs or None
 
     return None
 
@@ -385,11 +559,11 @@ def reorder_chunks_for_range(
     chunks: list[dict[str, Any]],
     scope: "SimpleRAGScope",
 ) -> list[dict[str, Any]]:
-    """For range queries, reorder chunks chronologically with financials first per period.
+    """For range queries, reorder chunks reverse-chronologically with financials first per period.
 
     Instead of relevance-sorted order (which mixes periods), this groups chunks by
-    period and sorts oldest-first so the LLM can clearly track which data belongs
-    to which quarter without confusing figures across periods.
+    period and sorts most-recent-first so the LLM presents data in reverse
+    chronological order without confusing figures across periods.
     """
     if not scope.temporal_intent or scope.temporal_intent.type != "range":
         return chunks
@@ -398,8 +572,11 @@ def reorder_chunks_for_range(
         meta = chunk.get("metadata") or {}
         period_end = meta.get("period_end", "")
         call_date = meta.get("call_date", "")
+        # Invert date string for descending sort while keeping financials first
+        date_key = period_end or call_date or "0000"
+        inverted = "".join(chr(ord("9") - ord(c)) if c.isdigit() else c for c in date_key)
         is_financials = 0 if meta.get("chunk_type") == "financials" else 1
-        return (period_end or call_date or "9999", is_financials)
+        return (inverted, is_financials)
 
     return sorted(chunks, key=_sort_key)
 
@@ -407,6 +584,7 @@ def reorder_chunks_for_range(
 def build_resolution_note(
     scope: "SimpleRAGScope",
     available_periods: dict[str, list[dict[str, Any]]],
+    query: str = "",
 ) -> str:
     """Build a note explaining temporal resolution so the answer LLM knows
     which periods were matched, even when fiscal labels differ from the user's wording."""
@@ -424,8 +602,20 @@ def build_resolution_note(
         year = intent.year or "current year"
         target_desc = f"CY Q{intent.quarter} {year} (calendar year)"
     elif intent.type == "range":
-        n = intent.num_quarters or 4
-        target_desc = f"the last {n} quarters"
+        if intent.start_year and intent.end_year and intent.start_year == intent.end_year:
+            sq = intent.start_quarter or 1
+            eq = intent.end_quarter or 4
+            if sq == 1 and eq == 4:
+                target_desc = f"all 4 quarters of calendar year {intent.start_year}"
+            else:
+                target_desc = f"CY Q{sq}–Q{eq} {intent.start_year}"
+        elif intent.start_year or intent.end_year:
+            s = f"Q{intent.start_quarter or 1} {intent.start_year or intent.end_year}"
+            e = f"Q{intent.end_quarter or 4} {intent.end_year or intent.start_year}"
+            target_desc = f"all quarters from CY {s} through CY {e}"
+        else:
+            n = intent.num_quarters or 4
+            target_desc = f"the last {n} calendar quarters (rolling from today)"
     else:
         target_desc = "the requested time period"
 
@@ -478,34 +668,71 @@ def build_resolution_note(
     lines.append(
         "IMPORTANT: Do NOT second-guess this resolution or say data is missing. "
         "The resolved fiscal quarter IS the correct answer to the user's query — report it directly. "
-        "When citing data, use the company's fiscal quarter label from the transcript "
-        "and include the calendar period for clarity "
-        "(e.g. \"Q4 FY2025 (Apr–Jun 2025) revenue was $70.1B\")."
+        "MANDATORY: Always format fiscal quarters with the calendar period in parentheses — "
+        "e.g. \"Q4 FY2025 (Apr–Jun 2025) revenue was $70.1B\". "
+        "Never write a bare fiscal quarter without its calendar period."
     )
 
-    # Range-specific instructions: help LLM organize multi-period data correctly
+    # Multi-period instructions: help LLM organize multi-period data correctly
     if intent.type == "range":
+        is_full_year = (
+            intent.start_year is not None
+            and intent.start_year == intent.end_year
+            and (intent.start_quarter or 1) == 1
+            and (intent.end_quarter or 4) == 4
+        )
+
         lines.append("")
         lines.append(
-            "RANGE QUERY INSTRUCTIONS: The context below is organized chronologically by period. "
+            "RANGE QUERY INSTRUCTIONS: The context below is organized in reverse chronological order "
+            "(most recent first). "
             "Each period's FINANCIAL SUMMARY chunk contains the authoritative figures for that quarter. "
             "You MUST:"
         )
+
+        if is_full_year:
+            year = intent.start_year
+            # Check if user explicitly asked for guidance/outlook
+            q_lower = query.lower()
+            wants_guidance = any(w in q_lower for w in ("guidance", "outlook", "forecast", "guide"))
+            figure_type = "GUIDED/OUTLOOK" if wants_guidance else "REPORTED/ACTUAL"
+            label_match = "Guided" if wants_guidance else "Reported"
+
+            lines.append(
+                f"  *** FULL-YEAR QUERY ({year}) ***\n"
+                f"  The user wants the TOTAL annual {figure_type} figure for {year}."
+            )
+            lines.append(
+                f"  STEP 1: Look in the FINANCIAL SUMMARY chunks for a {label_match} annual/full-year "
+                f"figure for {year}. If found, use it directly.\n"
+                f"  STEP 2 (if no annual figure): Sum the 4 quarterly {label_match} values from each "
+                "quarter's FINANCIAL SUMMARY. Present as:\n"
+                f"    Q1: $A + Q2: $B + Q3: $C + Q4: $D = $TOTAL for {year}\n"
+                "  MANDATORY: Show per-quarter breakdown. NEVER return just one quarter's figure.\n"
+                f"  MANDATORY: Only use lines marked '{label_match}' in the FINANCIAL SUMMARY chunks."
+            )
+        else:
+            lines.append(
+                "  1. Present data in REVERSE CHRONOLOGICAL ORDER (most recent quarter first). "
+                "Use a structured table or clearly labeled list with one entry per period. "
+                "Each entry MUST include the fiscal quarter with calendar period, "
+                "e.g. \"Q4 FY2025 (Oct–Dec 2025)\"."
+            )
+            lines.append(
+                "  2. Match each figure to its EXACT fiscal quarter — never combine or confuse "
+                "figures from different periods. A YTD or trailing-12-month figure belongs to "
+                "the quarter it was reported in, not to prior quarters."
+            )
+            lines.append(
+                "  3. If the user asks for an annual total but only quarterly figures are available, "
+                "sum the individual quarters and show the calculation. Do NOT use a YTD figure "
+                "from one quarter as the annual total for a different fiscal year."
+            )
+
         lines.append(
-            "  1. Present data as a structured table or clearly labeled list with one entry per period."
-        )
-        lines.append(
-            "  2. Match each figure to its EXACT fiscal quarter — never combine or confuse "
-            "figures from different periods. A YTD or trailing-12-month figure belongs to "
-            "the quarter it was reported in, not to prior quarters."
-        )
-        lines.append(
-            "  3. If the user asks for an annual total but only quarterly figures are available, "
-            "sum the individual quarters and show the calculation. Do NOT use a YTD figure "
-            "from one quarter as the annual total for a different fiscal year."
-        )
-        lines.append(
-            "  4. If a specific figure is not available for a period, say 'Not reported' "
+            "  Use only REPORTED/ACTUAL figures — never guidance or outlook — "
+            "unless the user explicitly asks for guidance. "
+            "If a specific figure is not available for a period, say 'Not reported' "
             "rather than approximating from other periods."
         )
 

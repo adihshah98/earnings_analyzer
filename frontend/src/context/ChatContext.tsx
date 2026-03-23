@@ -286,6 +286,8 @@ type ChatContextValue = {
   activeChatId: string | null
   activeChat: ChatSession | null
   sendingChatId: string | null
+  /** Assistant message id currently receiving streamed tokens; null when idle. */
+  streamingAssistantId: string | null
   draftForActiveChat: string
   error: string | null
   sourcesMessageId: string | null
@@ -514,6 +516,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     activeChatId: state.activeChatId,
     activeChat,
     sendingChatId: state.sendingChatId,
+    streamingAssistantId: state.streamingAssistantId,
     draftForActiveChat,
     error: state.error,
     sourcesMessageId: state.sourcesMessageId,

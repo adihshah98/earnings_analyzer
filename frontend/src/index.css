@@ -419,6 +419,27 @@ button {
 .message-content {
   white-space: normal;
   word-wrap: break-word;
+  overflow-x: auto;
+}
+
+/* Raw text while tokens stream — avoids broken half-parsed Markdown tables */
+.message-content-streaming {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+.message-content .markdown-table-wrap {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 0.6em 0;
+  -webkit-overflow-scrolling: touch;
+}
+
+.message-content .markdown-table-wrap table {
+  width: max-content;
+  min-width: 100%;
 }
 
 .message-content p {
@@ -485,6 +506,31 @@ button {
   padding-left: 1em;
   border-left: 3px solid #d4cfc8;
   color: #4a4642;
+}
+
+.message-content table {
+  width: 100%;
+  max-width: 100%;
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  font-size: 0.95em;
+}
+
+.message-content th,
+.message-content td {
+  border: 1px solid #d4cfc8;
+  padding: 0.45em 0.65em;
+  text-align: left;
+  vertical-align: top;
+}
+
+.message-content th {
+  background: rgba(0, 0, 0, 0.05);
+  font-weight: 600;
+}
+
+.message-bubble.assistant .message-content th {
+  background: rgba(0, 0, 0, 0.06);
 }
 
 .message-content h1,

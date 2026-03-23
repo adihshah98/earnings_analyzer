@@ -1,9 +1,52 @@
 """Tests for the RAG pipeline."""
 
+from datetime import date
+
 import pytest
 
+from app.agents.simple_rag import (
+    TemporalIntent,
+    _fix_last_year,
+    _resolve_temporal,
+)
 from app.rag.ingestion import chunk_text, generate_doc_id
 from app.rag.retriever import _rrf_merge
+
+
+class TestLastYearTemporal:
+    """'Last year' maps to rolling 4 calendar quarters; see _fix_last_year."""
+
+    def test_fix_last_year_sets_rolling_four(self):
+        t = TemporalIntent(type="latest")
+        out = _fix_last_year("What did NOW say about Veza last year?", None, t)
+        assert out.type == "range"
+        assert out.num_quarters == 4
+        assert out.start_year is None and out.end_year is None
+
+    def test_fix_last_year_skips_bare_year_in_query(self):
+        t = TemporalIntent(type="latest")
+        out = _fix_last_year("NOW revenue in 2023", None, t)
+        assert out.type == "latest"
+
+    def test_resolve_temporal_last_four_cy_quarters_march_2025(self):
+        """As of Mar 2025, last completed CY quarter is Q4 2024 → four quarters are all of CY 2024."""
+        temporal = TemporalIntent(type="range", num_quarters=4)
+        periods = {
+            "NOW": [
+                {"call_date": "2025-01-29", "period_end": "2024-12-31"},
+                {"call_date": "2024-10-29", "period_end": "2024-09-30"},
+                {"call_date": "2024-07-24", "period_end": "2024-06-30"},
+                {"call_date": "2024-04-24", "period_end": "2024-03-31"},
+            ],
+        }
+        pairs = _resolve_temporal(["NOW"], temporal, periods, today=date(2025, 3, 22))
+        assert pairs is not None
+        assert {p[1] for p in pairs} == {
+            "2025-01-29",
+            "2024-10-29",
+            "2024-07-24",
+            "2024-04-24",
+        }
 
 
 class TestChunking:

@@ -6,9 +6,18 @@ from app.rag.fiscal_calendar import (
     _compute_period_end_from_parts,
     compute_cy_quarter_end,
     compute_period_end,
+    cy_quarter_label_from_period_end,
     parse_fiscal_quarter,
     period_end_to_label,
 )
+
+
+class TestCyQuarterLabelFromPeriodEnd:
+    def test_q1(self):
+        assert cy_quarter_label_from_period_end(date(2024, 3, 31)) == "CY Q1 2024"
+
+    def test_q4(self):
+        assert cy_quarter_label_from_period_end(date(2024, 12, 31)) == "CY Q4 2024"
 
 
 class TestParseFiscalQuarter:

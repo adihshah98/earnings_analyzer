@@ -62,7 +62,7 @@ PostgreSQL + pgvector. Two chunk tables: `document_chunks` (production) and `eva
 
 ### Configuration
 All settings in `app/config.py` via environment variables. Key defaults:
-- `openai_model`: `gpt-4.1-nano` (fast; swap to `gpt-4o-mini` for quality)
+- `openai_model`: `gpt-4.1-mini` (fixed in code; `OPENAI_MODEL` env is ignored)
 - `embedding_model`: `text-embedding-3-small` (1536 dims)
 - `default_search_mode`: `hybrid`
 - `retrieval_top_k`: 5, `retrieval_threshold`: 0.35

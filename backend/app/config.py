@@ -1,8 +1,13 @@
 """Application configuration via pydantic-settings."""
 
 from functools import lru_cache
+from typing import Self
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Single source of truth for chat/completions. Not configurable via OPENAI_MODEL (env ignored).
+DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 
 
 class Settings(BaseSettings):
@@ -15,9 +20,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # OpenAI (gpt-4.1-nano is fastest; set OPENAI_MODEL=gpt-4o-mini for higher quality)
+    # OpenAI
     openai_api_key: str
-    openai_model: str = "gpt-4.1-mini"
+    openai_model: str = DEFAULT_OPENAI_MODEL
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
@@ -53,6 +58,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     admin_api_key: str = ""  # empty = admin routes unprotected (dev only)
     cors_origins: list[str] = ["http://localhost:5173"]
+
+    @model_validator(mode="after")
+    def _enforce_openai_model(self) -> Self:
+        """Always use DEFAULT_OPENAI_MODEL; OPENAI_MODEL in env is ignored."""
+        self.openai_model = DEFAULT_OPENAI_MODEL
+        return self
 
 
 @lru_cache()

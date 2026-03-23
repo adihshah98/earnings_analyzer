@@ -248,7 +248,7 @@ async def _prepare_simple_rag(
     chunks = trim_chunks_to_token_budget(chunks)
     chunks = reorder_chunks_for_range(chunks, scope)
     context_str = _format_context_for_prompt(chunks)
-    resolution_note = build_resolution_note(scope, available_periods)
+    resolution_note = build_resolution_note(scope, available_periods, query=query)
     if resolution_note:
         context_str = resolution_note + "\n\n" + context_str
     known_tickers = format_known_tickers(companies)
@@ -266,7 +266,7 @@ async def _prepare_simple_rag(
     return chunks, full_prompt, today_iso, prior_turns, llm_query
 
 
-_SOURCE_REF_RE = re.compile(r"\[Source\s+(\d+)\]", re.IGNORECASE)
+_SOURCE_REF_RE = re.compile(r"\[Source\s+(\d+)[^\]]*\]", re.IGNORECASE)
 
 
 def _parse_cited_source_indices(answer: str) -> set[int]:

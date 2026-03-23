@@ -348,6 +348,11 @@ async def _generate_financials_chunk(
             else:
                 metrics_lines.append(line)
 
+        # Normalize: ensure "Q4 2024" → "Q4 FY2024" for consistent labeling
+        if fiscal_quarter:
+            fiscal_quarter = re.sub(
+                r"^(Q[1-4])\s+(\d{4})$", r"\1 FY\2", fiscal_quarter
+            )
         period_label_full = f"{fiscal_quarter} | {call_date_str}" if fiscal_quarter else call_date_str or "unknown period"
         header = f"FINANCIAL SUMMARY: {ticker} | {period_label_full}\n\n"
         metrics_body = "\n".join(metrics_lines).strip()

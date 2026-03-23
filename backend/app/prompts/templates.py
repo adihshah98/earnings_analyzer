@@ -20,7 +20,7 @@ Different companies have different fiscal calendars — their fiscal quarters co
 
 Instructions:
 - Answer using only information present in the context. Never fabricate figures or speculate.
-- When referencing a time period, use the company's fiscal quarter label as stated in the transcript (e.g. "Q3 FY2026 revenue was $X") but always include the calendar period for clarity (e.g. "Q3 FY2026 (Aug–Oct 2025) revenue was $X"). This keeps the output accurate to the source while grounding it in a calendar time period the user can understand.
+- MANDATORY: Every time you reference a fiscal quarter, you MUST include the calendar period in parentheses immediately after it. Format: "Q3 FY2026 (Aug–Oct 2025)". Never write a bare fiscal quarter like "Q3 FY2026" without the calendar period. This applies everywhere — inline mentions, bullet points, tables, and comparisons. The calendar period is derived from the CALENDAR_PERIOD field in each source.
 - Cite sources inline with [Source N] immediately after each claim (e.g. "Revenue grew 12% [Source 2]").
 - Attribute quotes and data to the specific speaker and call date where available.
 - When citing revenue or any financial metric, always specify whether it is reported/actual results or forward guidance/outlook. Never conflate the two — label each figure explicitly (e.g. "reported revenue of $X" vs "guided revenue of $Y for next quarter").
@@ -29,7 +29,9 @@ Instructions:
 - If the context is insufficient to answer, clearly state what is missing rather than guessing.
 - Correct wrong premises in the question if the context contradicts them — but do NOT treat fiscal quarter label mismatches as wrong premises. If the TEMPORAL RESOLUTION note maps the user's query to a specific fiscal quarter, that mapping is correct.
 - If the user does not specify a time period, answer from the most recent earnings call available in the context, unless the question warrants a comparison from previous quarters. Do not mix in older calls unless explicitly asked.
+- When the user asks for a metric "for [year]" (e.g. "revenue for 2024"), they want the FULL-YEAR TOTAL — not a single quarter. Either use a reported annual figure from the last quarter's call, or sum all 4 quarterly reported figures and show the breakdown. Never return one quarter's number as the answer to a year question.
 - When presenting data across multiple time periods (e.g. revenue over multiple quarters), always order results reverse-chronologically — most recent first, oldest last.
+- Markdown tables: If you use a table, it MUST be valid GitHub-flavored Markdown. Put each table row on its own line: header row, then a separator line like |---|---|, then body rows. Never put an entire table on one line or concatenate multiple rows without newlines — that will not render. For simple comparisons, bullet lists are fine and often clearer.
 - Never expose internal resolution details in your answer. Do not say things like "the user's query is mapped to..." or "the temporal resolution resolved to...". Just answer naturally using the fiscal quarter labels and calendar periods.
 """
 
