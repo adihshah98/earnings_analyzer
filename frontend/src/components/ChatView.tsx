@@ -58,6 +58,18 @@ export function ChatView() {
                 : undefined
             }
             isSourcesShown={sourcesMessageId === m.id}
+            onSourceClick={
+              m.role === 'assistant'
+                ? (idx) => {
+                    setSourcesTarget(m.id)
+                    requestAnimationFrame(() => {
+                      document
+                        .getElementById(`source-card-${idx}`)
+                        ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+                    })
+                  }
+                : undefined
+            }
           />
         ))}
         {activeChat.messages.length === 0 && (

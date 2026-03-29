@@ -43,8 +43,13 @@ export interface ConversationSessionSummary {
   title: string | null
 }
 
-/** Backend conversation history entry (same shape as HistoryEntry) */
-export type ConversationHistoryEntry = HistoryEntry
+/** Backend conversation history entry */
+export interface ConversationHistoryEntry {
+  role: 'user' | 'assistant'
+  content: string
+  created_at?: string | null
+  sources?: SourceDocument[] | null
+}
 
 export type Role = 'user' | 'assistant'
 

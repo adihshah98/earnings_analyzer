@@ -152,6 +152,8 @@ class ConversationMessage(Base):
     )
     role: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[list | dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    sources: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
     position: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),

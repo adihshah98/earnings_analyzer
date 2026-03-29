@@ -20,6 +20,8 @@ from app.config import get_settings
 from app.conversations.router import router as conversations_router
 from app.evals.router import router as evals_router
 from app.models.database import health_check
+from app.rag.embeddings import generate_embedding
+from app.rag.retriever import get_known_companies
 from app.rag.router import router as rag_router
 
 # Configure logging
@@ -37,6 +39,16 @@ async def lifespan(app: FastAPI):
     logger.info("KB Agent starting up...")
     logger.info(f"Model: {settings.openai_model}")
     logger.info(f"Embedding model: {settings.embedding_model}")
+    try:
+        companies = await get_known_companies()
+        logger.info(f"Pre-warmed companies cache: {len(companies)} companies")
+    except Exception as e:
+        logger.warning(f"Failed to pre-warm companies cache: {e}")
+    try:
+        await generate_embedding("warmup")
+        logger.info("Pre-warmed OpenAI embedding connection")
+    except Exception as e:
+        logger.warning(f"Failed to pre-warm embedding connection: {e}")
     yield
     logger.info("KB Agent shutting down...")
 

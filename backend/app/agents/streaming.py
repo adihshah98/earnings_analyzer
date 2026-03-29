@@ -4,6 +4,8 @@ import asyncio
 import logging
 import re
 import time
+
+import openai
 from collections import deque
 from datetime import date
 from typing import Any
@@ -14,6 +16,7 @@ from app.agents.prompt_utils import build_system_prompt, format_known_tickers
 from app.agents.simple_rag import (
     _format_context_for_prompt,
     _rewrite_query_for_retrieval,
+    _should_skip_rewrite,
     build_resolution_note,
     reorder_chunks_for_range,
     resolve_company_and_date,
@@ -34,6 +37,7 @@ from app.rag.retriever import (
     get_financials_chunks_for_pairs,
     get_known_companies,
     retrieve_relevant_chunks,
+    rrf_merge,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,49 +76,18 @@ def _is_greeting(query: str) -> bool:
 
 
 async def _append_conversation_turn_background(
-    session_id: str, query: str, answer: str, user_id: str | None = None
+    session_id: str,
+    query: str,
+    answer: str,
+    user_id: str | None = None,
+    sources: list | None = None,
 ) -> None:
     """Fire-and-forget: persist conversation turn without blocking the response."""
     try:
-        await append_conversation_turn(session_id, query, answer, user_id=user_id)
+        await append_conversation_turn(session_id, query, answer, user_id=user_id, sources=sources)
     except Exception as e:
         logger.warning("Failed to persist conversation turn (background): %s", e)
 
-
-def _extract_prior_turns(message_history: list, limit: int = 3) -> list[dict]:
-    """Convert ModelMessage history to the last `limit` (user, assistant) turn pairs
-    in OpenAI Responses API input format."""
-    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
-
-    pairs: list[tuple[str, str]] = []
-    msgs = list(message_history)
-    i = 0
-    while i < len(msgs):
-        msg = msgs[i]
-        if isinstance(msg, ModelRequest):
-            user_text = " ".join(
-                p.content for p in msg.parts
-                if isinstance(p, UserPromptPart) and isinstance(p.content, str)
-            ).strip()
-            assistant_text = ""
-            if i + 1 < len(msgs) and isinstance(msgs[i + 1], ModelResponse):
-                assistant_text = " ".join(
-                    p.content for p in msgs[i + 1].parts if isinstance(p, TextPart)
-                ).strip()
-                i += 2
-            else:
-                i += 1
-            if user_text:
-                pairs.append((user_text, assistant_text))
-        else:
-            i += 1
-
-    result = []
-    for user_text, assistant_text in pairs[-limit:]:
-        result.append({"role": "user", "content": [{"type": "input_text", "text": user_text}]})
-        if assistant_text:
-            result.append({"role": "assistant", "content": [{"type": "output_text", "text": assistant_text}]})
-    return result
 
 
 async def _prepare_simple_rag(
@@ -154,6 +127,8 @@ async def _prepare_simple_rag(
     companies = companies or []
     logger.info("[latency] get_known_companies + history + periods: %.3fs", time.perf_counter() - t0)
 
+    # Single pass: extract (query, answer) pairs used for both conversation_context
+    # (scope resolution) and prior_turns (LLM multi-turn history).
     db_turns = get_recent_turns(message_history, limit=5) if message_history else []
     db_context = [f"Q: {q} A: {a}" for q, a in db_turns]
     # Merge with in-memory buffer to handle the fire-and-forget timing race:
@@ -166,7 +141,14 @@ async def _prepare_simple_rag(
     conversation_context = merged[-5:] if merged else None
     logger.info("[debug] conversation_context: %s", conversation_context)
 
-    # Run scope resolution (tickers + temporal), query rewriting, and embedding in parallel.
+    # Run scope resolution, (optional) query rewriting, and embedding in parallel.
+    # Rewriting is skipped for short/simple queries to save an LLM round-trip.
+    async def _maybe_rewrite() -> list[str]:
+        if _should_skip_rewrite(query):
+            logger.info("[latency] _rewrite_query_for_retrieval: skipped (simple query)")
+            return [query]
+        return await _rewrite_query_for_retrieval(query)
+
     t0 = time.perf_counter()
     scope, rewritten_queries, query_embedding = await asyncio.gather(
         resolve_company_and_date(
@@ -174,7 +156,7 @@ async def _prepare_simple_rag(
             conversation_context=conversation_context,
             available_periods=available_periods,
         ),
-        _rewrite_query_for_retrieval(query),
+        _maybe_rewrite(),
         generate_embedding(query),
     )
     logger.info("[latency] resolve_scope + rewrite + embedding (parallel): %.3fs", time.perf_counter() - t0)
@@ -195,10 +177,21 @@ async def _prepare_simple_rag(
 
     effective_mode = search_mode or settings.default_search_mode
     threshold = retrieval_threshold if retrieval_threshold is not None else settings.retrieval_threshold
-    top_k = 40 if scope.tickers else settings.retrieval_top_k
+    # Scale per-query top_k with the number of resolved pairs so every pair
+    # has enough candidates in the pool for per-pair selection downstream.
+    n_pairs = len(scope.ticker_date_pairs) if scope.ticker_date_pairs else max(len(scope.tickers or []), 1)
+    top_k = min(max(8 * n_pairs, 20), 80)
 
-    # Retrieve for each rewritten query in parallel; original query reuses its pre-computed embedding.
+    # Pre-compute embeddings for all rewritten queries in parallel so each
+    # retrieve_relevant_chunks call can reuse its embedding instead of regenerating it.
     t0 = time.perf_counter()
+    other_queries = [q for q in rewritten_queries if q != query]
+    if other_queries:
+        other_embeddings = await asyncio.gather(*[generate_embedding(q) for q in other_queries])
+        embedding_map = {query: query_embedding, **dict(zip(other_queries, other_embeddings))}
+    else:
+        embedding_map = {query: query_embedding}
+
     per_query_chunks = await asyncio.gather(*[
         retrieve_relevant_chunks(
             query=q,
@@ -206,20 +199,48 @@ async def _prepare_simple_rag(
             threshold=threshold,
             filter_metadata=filter_metadata,
             search_mode=effective_mode,
-            query_embedding=query_embedding if q == query else None,
+            query_embedding=embedding_map.get(q),
         )
         for q in rewritten_queries
     ])
     logger.info("[latency] retrieve_relevant_chunks (%d queries): %.3fs", len(rewritten_queries), time.perf_counter() - t0)
 
-    # Merge: deduplicate by chunk_id, keep highest similarity score, re-sort.
-    seen: dict[str, dict] = {}
-    for result_chunks in per_query_chunks:
-        for chunk in result_chunks:
-            cid = chunk["chunk_id"]
-            if cid not in seen or chunk["similarity"] > seen[cid]["similarity"]:
-                seen[cid] = chunk
-    chunks = sorted(seen.values(), key=lambda x: x["similarity"], reverse=True)[:top_k]
+    # Cross-query RRF merge: chunks appearing in multiple query variants rank higher.
+    ranked_lists = [
+        [(c["chunk_id"], c["similarity"]) for c in result]
+        for result in per_query_chunks if result
+    ]
+    merged_rrf = rrf_merge(ranked_lists)
+    id_to_chunk: dict[str, dict] = {}
+    for result in per_query_chunks:
+        for c in result:
+            cid = c["chunk_id"]
+            if cid not in id_to_chunk or c["similarity"] > id_to_chunk[cid]["similarity"]:
+                id_to_chunk[cid] = c
+    rrf_pool = [id_to_chunk[cid] for cid, _ in merged_rrf if cid in id_to_chunk]
+
+    # Per-pair selection: 3 regular chunks per (ticker, date) pair in RRF rank order,
+    # guaranteeing coverage across all pairs. Single-pair queries get top 8 globally.
+    _CHUNKS_PER_PAIR = 3
+    if scope.ticker_date_pairs and len(scope.ticker_date_pairs) > 1:
+        chunks: list[dict] = []
+        per_pair_counts: dict[tuple, int] = {}
+        target_pairs = {(t, d) for t, d in scope.ticker_date_pairs}
+        for chunk in rrf_pool:
+            meta = chunk.get("metadata") or {}
+            pair = (meta.get("company_ticker"), meta.get("call_date"))
+            if pair not in target_pairs:
+                continue
+            if per_pair_counts.get(pair, 0) < _CHUNKS_PER_PAIR:
+                chunks.append(chunk)
+                per_pair_counts[pair] = per_pair_counts.get(pair, 0) + 1
+            if (
+                len(per_pair_counts) == len(target_pairs)
+                and all(v >= _CHUNKS_PER_PAIR for v in per_pair_counts.values())
+            ):
+                break
+    else:
+        chunks = rrf_pool[:8]
 
     # Always include financial summary chunks for resolved (ticker, call_date) pairs.
     # When temporal resolution succeeded, use all resolved pairs; otherwise extract from results.
@@ -261,7 +282,13 @@ async def _prepare_simple_rag(
     llm_query = rewrite_query_for_answer_llm(query, scope, available_periods)
     if llm_query != query:
         logger.info("[debug] query rewritten for answer LLM: %r → %r", query, llm_query)
-    prior_turns = _extract_prior_turns(message_history, limit=3)
+    # Derive prior_turns from the already-computed db_turns (last 3) — avoids a second
+    # pass through message_history that _extract_prior_turns would otherwise do.
+    prior_turns = []
+    for user_text, assistant_text in db_turns[-3:]:
+        prior_turns.append({"role": "user", "content": [{"type": "input_text", "text": user_text}]})
+        if assistant_text:
+            prior_turns.append({"role": "assistant", "content": [{"type": "output_text", "text": assistant_text}]})
     logger.info("[latency] _prepare_simple_rag total: %.3fs", time.perf_counter() - t_total)
     return chunks, full_prompt, today_iso, prior_turns, llm_query
 
@@ -440,8 +467,16 @@ async def stream_simple_rag_or_agent(
                     accumulated.append(delta)
                     yield "delta", delta
     except Exception as e:
-        logger.exception("Streaming completion failed: %s", e)
-        accumulated = ["[Error while streaming response.]"]
+        err_str = str(e).lower()
+        if isinstance(e, openai.RateLimitError) and "insufficient_quota" in err_str:
+            msg = "Your OpenAI account has run out of credits. Please check your billing at platform.openai.com and try again."
+        elif isinstance(e, openai.RateLimitError):
+            msg = "The AI provider is currently rate-limiting requests. Please wait a moment and try again."
+        else:
+            logger.exception("Streaming completion failed: %s", e)
+            msg = "[Error while generating response.]"
+        accumulated = [msg]
+        yield "delta", msg
     else:
         logger.info(
             "[latency] LLM stream total: %.3fs (tokens: %d)",
@@ -459,7 +494,10 @@ async def stream_simple_rag_or_agent(
         buf = _SESSION_RECENT_QUERIES.setdefault(session_id, deque(maxlen=_SESSION_RECENT_QUERIES_LIMIT))
         buf.append(f"Q: {query} A: {answer[:400]}")
         _fire_and_forget(
-            _append_conversation_turn_background(session_id, query, answer, user_id=user_id)
+            _append_conversation_turn_background(
+                session_id, query, answer, user_id=user_id,
+                sources=sources or None,
+            )
         )
     yield "done", {
         "answer": answer,

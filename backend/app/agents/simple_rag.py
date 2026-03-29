@@ -426,6 +426,27 @@ def _resolve_temporal(
     return None
 
 
+_SKIP_REWRITE_RE = re.compile(
+    r"^\s*(?:sort|order|show|display|list|format|group|arrange|compare|rank|table|chart|give me|what is|what are|who is)\b",
+    re.IGNORECASE,
+)
+
+
+def _should_skip_rewrite(query: str) -> bool:
+    """Return True when query rewriting adds no retrieval value.
+
+    Skips the LLM call for:
+    - Short queries (≤ 5 words): single-concept, no aliases to expand.
+    - Display/formatting instructions: the LLM would return the original anyway.
+    """
+    words = query.strip().split()
+    if len(words) <= 5:
+        return True
+    if _SKIP_REWRITE_RE.match(query.strip()):
+        return True
+    return False
+
+
 async def _rewrite_query_for_retrieval(query: str) -> list[str]:
     """Expand a user query into 2-3 retrieval queries covering different interpretations.
 
@@ -540,7 +561,7 @@ def trim_chunks_to_token_budget(
     total = sum(len(_tokenizer.encode(c.get("content", ""))) for c in ordered)
 
     if total <= budget:
-        return chunks  # nothing to trim
+        return ordered  # financials-first order, consistent with the trim path
 
     # Drop lowest-relevance regular chunks first, then financials if still over.
     trimmed = list(ordered)

@@ -42,18 +42,24 @@ function contentWithHighlights(content: string, spans: CitedSpan[]): { text: str
   return segments
 }
 
-export function SourceCard({ source, index, onViewTranscript }: Props) {
-  const title =
-    (typeof source.metadata.title === 'string' && source.metadata.title) ||
-    (typeof source.metadata.company_ticker === 'string' && source.metadata.company_ticker) ||
-    'Source'
+function formatCallDate(raw: string): string {
+  // raw is typically YYYY-MM-DD
+  const d = new Date(raw + 'T00:00:00')
+  if (isNaN(d.getTime())) return raw
+  return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+}
 
-  const similarityPercent = (source.similarity * 100).toFixed(1)
+export function SourceCard({ source, index, onViewTranscript }: Props) {
+  const sourceNum = source.source_index ?? index + 1
 
   const company =
     typeof source.metadata.company_ticker === 'string' ? source.metadata.company_ticker : null
   const callDate =
     typeof source.metadata.call_date === 'string' ? source.metadata.call_date : null
+  const fiscalQuarter =
+    typeof source.metadata.fiscal_quarter === 'string' ? source.metadata.fiscal_quarter : null
+
+  const similarityPercent = Math.round(source.similarity * 100)
 
   const handleClick = () => onViewTranscript?.(source.chunk_id)
 
@@ -64,6 +70,7 @@ export function SourceCard({ source, index, onViewTranscript }: Props) {
 
   return (
     <article
+      id={`source-card-${sourceNum}`}
       className={'source-card' + (onViewTranscript ? ' source-card-clickable' : '')}
       onClick={onViewTranscript ? handleClick : undefined}
       role={onViewTranscript ? 'button' : undefined}
@@ -80,10 +87,19 @@ export function SourceCard({ source, index, onViewTranscript }: Props) {
       }
     >
       <div className="source-card-header">
-        <div className="source-title">
-          [Source {source.source_index ?? index + 1}] {title}
+        <div className="source-card-header-left">
+          <span className="source-num-badge">{sourceNum}</span>
+          <span className="source-card-label">
+            {company && <strong>{company}</strong>}
+            {callDate && (
+              <span className="source-card-date">
+                {fiscalQuarter ? ` · ${fiscalQuarter}` : ''}
+                {' · '}{formatCallDate(callDate)}
+              </span>
+            )}
+          </span>
         </div>
-        <div className="similarity-pill">{similarityPercent}% match</div>
+        <span className="similarity-pill">{similarityPercent}%</span>
       </div>
       <div className="source-content">
         {segments.map((seg, i) =>
@@ -96,14 +112,9 @@ export function SourceCard({ source, index, onViewTranscript }: Props) {
           )
         )}
       </div>
-      <div className="source-meta">
-        {company && <span>Company: {company}</span>}
-        {callDate && <span>Date: {callDate}</span>}
-      </div>
       {onViewTranscript && (
         <div className="source-card-view-transcript">View full transcript →</div>
       )}
     </article>
   )
 }
-

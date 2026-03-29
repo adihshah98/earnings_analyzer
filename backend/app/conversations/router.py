@@ -31,6 +31,7 @@ class HistoryEntry(BaseModel):
     role: str = Field(..., description="Message role: 'user' or 'assistant'")
     content: str = Field(..., description="Message content")
     created_at: datetime | None = Field(None, description="When the message was created")
+    sources: list | None = Field(None, description="Cited sources for assistant messages")
 
 
 @router.get("/sessions", response_model=list[SessionSummary])
@@ -64,6 +65,6 @@ async def get_history(session_id: str, user: dict = Depends(require_user)):
 
     rows = await get_conversation_history_for_api(session_id)
     return [
-        HistoryEntry(role=role, content=content, created_at=created_at)
-        for role, content, created_at in rows
+        HistoryEntry(role=role, content=content, created_at=created_at, sources=sources)
+        for role, content, created_at, sources in rows
     ]

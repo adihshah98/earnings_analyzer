@@ -5,20 +5,14 @@ import remarkGfm from 'remark-gfm'
 import type { ChatMessage } from '../types'
 import { prepareAssistantMarkdown } from '../utils/markdown'
 
-const MARKDOWN_COMPONENTS: Components = {
-  table: ({ children }) => (
-    <div className="markdown-table-wrap">
-      <table>{children}</table>
-    </div>
-  ),
-}
-
 type Props = {
   message: ChatMessage
   /** While true, skip Markdown parsing so partial tables are not broken mid-stream. */
   isStreaming?: boolean
   onToggleSources?: () => void
   isSourcesShown?: boolean
+  /** Called when a [Source N] citation badge in the answer is clicked. */
+  onSourceClick?: (sourceIndex: number) => void
 }
 
 export function MessageBubble({
@@ -26,9 +20,34 @@ export function MessageBubble({
   isStreaming = false,
   onToggleSources,
   isSourcesShown,
+  onSourceClick,
 }: Props) {
   const isUser = message.role === 'user'
   const hasSources = !!message.sources && message.sources.length > 0
+
+  const markdownComponents: Components = useMemo(() => ({
+    table: ({ children }) => (
+      <div className="markdown-table-wrap">
+        <table>{children}</table>
+      </div>
+    ),
+    a: ({ href, children }) => {
+      const match = href?.match(/^#source-(\d+)$/)
+      if (match) {
+        const idx = parseInt(match[1], 10)
+        return (
+          <button
+            type="button"
+            className="source-ref-badge"
+            onClick={() => onSourceClick?.(idx)}
+          >
+            {children}
+          </button>
+        )
+      }
+      return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+    },
+  }), [onSourceClick])
 
   const markdownSource = useMemo(
     () => prepareAssistantMarkdown(message.content),
@@ -52,7 +71,7 @@ export function MessageBubble({
           ) : (
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
-              components={MARKDOWN_COMPONENTS}
+              components={markdownComponents}
             >
               {markdownSource}
             </ReactMarkdown>

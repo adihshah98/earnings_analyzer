@@ -12,7 +12,15 @@ export function SourcesPanel() {
   }
 
   const targetMessage = activeChat.messages.find((m) => m.id === sourcesMessageId)
-  const sources = targetMessage?.sources ?? []
+  const rawSources = targetMessage?.sources ?? []
+
+  // Sort chronologically by call_date, then by source_index within the same date
+  const sources = [...rawSources].sort((a, b) => {
+    const da = typeof a.metadata.call_date === 'string' ? a.metadata.call_date : ''
+    const db = typeof b.metadata.call_date === 'string' ? b.metadata.call_date : ''
+    if (da !== db) return da < db ? -1 : 1
+    return (a.source_index ?? 0) - (b.source_index ?? 0)
+  })
 
   return (
     <>
@@ -22,7 +30,7 @@ export function SourcesPanel() {
             <div className="sources-title">Sources</div>
             <div className="sources-subtitle">
               {sources.length > 0
-                ? `${sources.length} source${sources.length === 1 ? '' : 's'} — click to see full transcript`
+                ? `${sources.length} source${sources.length === 1 ? '' : 's'} — click to view transcript`
                 : 'No sources for this message'}
             </div>
           </div>

@@ -8,7 +8,6 @@ from uuid import UUID
 
 from typing import Any, Literal
 
-from cachetools import TTLCache
 from sqlalchemy import and_, desc, func, or_, select
 
 from app.config import get_settings
@@ -30,7 +29,7 @@ RRF_K = 60  # Reciprocal Rank Fusion constant
 
 
 
-def _rrf_merge(
+def rrf_merge(
     ranked_lists: list[list[tuple[str, float]]],
     k: int = RRF_K,
 ) -> list[tuple[str, float]]:
@@ -285,7 +284,7 @@ async def retrieve_relevant_chunks(
             vec_list = [(str(c["id"]), c["similarity"]) for c in vector_chunks]
             kw_list = [(str(c["id"]), c["similarity"]) for c in keyword_chunks]
 
-            merged = _rrf_merge([vec_list, kw_list])
+            merged = rrf_merge([vec_list, kw_list])
             merged_ids = [cid for cid, _ in merged[:top_k]]
             id_to_chunk = {str(c["id"]): c for c in vector_chunks + keyword_chunks}
 
@@ -402,12 +401,10 @@ async def list_available_transcripts(
     ]
 
 
-# Process-local cache for get_known_companies (24h TTL).
-# On multi-instance deployments, each process has its own cache; no distributed cache.
-_COMPANIES_CACHE: TTLCache = TTLCache(maxsize=2, ttl=86400)  # 24 hours
-
-# Available periods cache: {ticker: [{call_date, fiscal_quarter, period_end}, ...]} sorted desc.
-_PERIODS_CACHE: TTLCache = TTLCache(maxsize=2, ttl=86400)  # 24 hours
+# Process-local in-memory caches. Cleared explicitly on ingest.
+# On multi-instance deployments, each process has its own cache; no distributed invalidation.
+_COMPANIES_CACHE: dict = {}
+_PERIODS_CACHE: dict = {}
 
 
 async def get_known_companies() -> list[dict[str, str]]:

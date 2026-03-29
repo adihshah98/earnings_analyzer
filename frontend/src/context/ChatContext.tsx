@@ -370,6 +370,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           role: e.role as 'user' | 'assistant',
           content: e.content,
           createdAt: e.created_at ?? new Date().toISOString(),
+          sources: e.sources ?? undefined,
         }))
         const firstUser = entries.find((e) => e.role === 'user')
         const title = firstUser?.content

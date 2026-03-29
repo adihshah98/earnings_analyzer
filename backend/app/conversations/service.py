@@ -106,6 +106,7 @@ async def append_conversation_turn(
     user_text: str,
     assistant_text: str,
     user_id: str | None = None,
+    sources: list | None = None,
 ) -> None:
     """Append a user+assistant turn to a session. Wrapper for simple text persistence.
 
@@ -113,14 +114,45 @@ async def append_conversation_turn(
         session_id: The conversation session ID.
         user_text: The user's message text.
         assistant_text: The assistant's response text.
+        sources: Optional list of source dicts to store with the assistant message.
     """
     if not session_id:
         return
+    import uuid as _uuid
     from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
     request = ModelRequest(parts=[UserPromptPart(content=user_text)])
     response = ModelResponse(parts=[TextPart(content=assistant_text)])
-    await append_conversation_messages(session_id, [request, response], user_id=user_id)
+    parsed_user_id = _uuid.UUID(user_id) if user_id else None
+
+    async with get_session() as session:
+        next_pos_result = await session.execute(
+            select(func.coalesce(func.max(ConversationMessage.position), 0))
+            .where(ConversationMessage.session_id == session_id)
+        )
+        next_pos = (next_pos_result.scalar_one() or 0) + 1
+
+        req_row = ConversationMessage(
+            session_id=session_id,
+            user_id=parsed_user_id,
+            role="request",
+            content=_serialize_message(request),
+            title=user_text[:100],
+            position=next_pos,
+        )
+        session.add(req_row)
+
+        resp_row = ConversationMessage(
+            session_id=session_id,
+            user_id=parsed_user_id,
+            role="response",
+            content=_serialize_message(response),
+            sources=sources,
+            position=next_pos + 1,
+        )
+        session.add(resp_row)
+
+    logger.debug(f"Appended turn to session {session_id}")
 
 
 async def list_sessions(user_id: str | None = None) -> list[tuple[str, object, str | None]]:
@@ -130,10 +162,9 @@ async def list_sessions(user_id: str | None = None) -> list[tuple[str, object, s
 
     Returns:
         List of (session_id, updated_at, title) tuples, newest first.
-        Title is derived from the first user message in the session.
+        Title is read directly from the stored title column — no deserialization needed.
     """
     import uuid as _uuid
-    from pydantic_ai.messages import ModelRequest, UserPromptPart
 
     async with get_session() as session:
         q = select(
@@ -155,47 +186,29 @@ async def list_sessions(user_id: str | None = None) -> list[tuple[str, object, s
         if not session_ids:
             return []
 
-        # Fetch first request message per session for titles
-        first_msgs_q = (
+        # Fetch first title per session using DISTINCT ON (no deserialization).
+        # Falls back to None for sessions created before migration 015.
+        first_title_q = (
             select(
                 ConversationMessage.session_id,
-                ConversationMessage.content,
+                ConversationMessage.title,
             )
             .where(
                 ConversationMessage.session_id.in_(session_ids),
                 ConversationMessage.role == "request",
+                ConversationMessage.title.isnot(None),
             )
             .distinct(ConversationMessage.session_id)
             .order_by(
                 ConversationMessage.session_id,
                 nulls_last(ConversationMessage.position.asc()),
                 ConversationMessage.created_at.asc(),
-                ConversationMessage.id.asc(),
             )
         )
-        first_msgs_result = await session.execute(first_msgs_q)
-        first_msgs = {r[0]: r[1] for r in first_msgs_result.all()}
+        title_result = await session.execute(first_title_q)
+        titles = {r[0]: r[1] for r in title_result.all()}
 
-    def _extract_title(content: object) -> str | None:
-        if not content:
-            return None
-        try:
-            msgs = _deserialize_message(content)
-            for msg in msgs:
-                if isinstance(msg, ModelRequest):
-                    for part in msg.parts:
-                        if isinstance(part, UserPromptPart) and isinstance(part.content, str):
-                            text = part.content.strip()
-                            if text:
-                                return text[:100]
-        except Exception:
-            pass
-        return None
-
-    return [
-        (sid, updated_at, _extract_title(first_msgs.get(sid)))
-        for sid, updated_at in rows
-    ]
+    return [(sid, updated_at, titles.get(sid)) for sid, updated_at in rows]
 
 
 async def delete_session(session_id: str) -> None:
@@ -213,11 +226,12 @@ async def delete_session(session_id: str) -> None:
 
 async def get_conversation_history_for_api(
     session_id: str,
-) -> list[tuple[str, str, object]]:
-    """Load conversation history as (role, content_text, created_at) for API response.
+) -> list[tuple[str, str, object, list | None]]:
+    """Load conversation history as (role, content_text, created_at, sources) for API response.
 
     Returns:
-        List of (role, content_text, created_at) tuples.
+        List of (role, content_text, created_at, sources) tuples.
+        sources is only non-None for assistant (response) messages.
     """
     if not session_id:
         return []
@@ -235,7 +249,12 @@ async def get_conversation_history_for_api(
 
     async with get_session() as session:
         result = await session.execute(
-            select(ConversationMessage.role, ConversationMessage.content, ConversationMessage.created_at)
+            select(
+                ConversationMessage.role,
+                ConversationMessage.content,
+                ConversationMessage.created_at,
+                ConversationMessage.sources,
+            )
             .where(ConversationMessage.session_id == session_id)
             .order_by(
                 nulls_last(ConversationMessage.position.asc()),
@@ -245,12 +264,13 @@ async def get_conversation_history_for_api(
         )
         rows = result.mappings().all()
 
-    entries: list[tuple[str, str, object]] = []
+    entries: list[tuple[str, str, object, list | None]] = []
     for row in rows:
         role = "user" if row["role"] == "request" else "assistant"
         msgs = _deserialize_message(row["content"])
         content = extract_text(msgs[0]) if msgs else ""
-        entries.append((role, content, row["created_at"]))
+        sources = row["sources"] if role == "assistant" else None
+        entries.append((role, content, row["created_at"], sources))
     return entries
 
 

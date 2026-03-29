@@ -37,11 +37,45 @@ button {
   font-family: inherit;
 }
 
+.app-shell-wrapper {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
 .app-shell {
   display: flex;
-  height: 100vh;
-  max-height: 100vh;
+  flex: 1;
+  min-height: 0;
   color: #2d2a26;
+}
+
+/* Backend warming banner */
+.warming-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: #fff8ed;
+  border-bottom: 1px solid #f0d9a8;
+  font-size: 13px;
+  color: #7a5c1e;
+  flex-shrink: 0;
+}
+
+
+.warming-banner__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
 }
 
 /* Login page */
@@ -522,6 +556,9 @@ button {
   padding: 0.45em 0.65em;
   text-align: left;
   vertical-align: top;
+  max-width: 260px;
+  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 .message-content th {
@@ -577,6 +614,30 @@ button {
 
 .view-sources-button:hover {
   border-color: #8b7355;
+  color: #3d3a36;
+}
+
+/* Inline [Source N] citation badges in assistant messages */
+.source-ref-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.8em;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid #c4beb5;
+  background: #ede9e4;
+  color: #6b5b4f;
+  cursor: pointer;
+  line-height: 1.4;
+  vertical-align: baseline;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  font-family: inherit;
+}
+
+.source-ref-badge:hover {
+  background: #e0d8d0;
+  border-color: #a89880;
   color: #3d3a36;
 }
 
@@ -737,17 +798,53 @@ button {
   font-size: 12px;
 }
 
-.source-title {
-  font-weight: 500;
+.source-card-header-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex: 1;
+}
+
+.source-num-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: #e8e4df;
+  color: #6b6560;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+  padding: 0 4px;
+}
+
+.source-card-label {
+  font-size: 12px;
   color: #2d2a26;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-card-label strong {
+  font-weight: 600;
+}
+
+.source-card-date {
+  color: #6b6560;
+  font-weight: 400;
 }
 
 .similarity-pill {
   font-size: 11px;
-  padding: 3px 8px;
+  padding: 2px 6px;
   border-radius: 4px;
   background: #e8e4df;
-  color: #6b6560;
+  color: #8a857e;
+  flex-shrink: 0;
 }
 
 .source-content {

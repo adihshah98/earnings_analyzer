@@ -9,6 +9,9 @@ import { getStoredToken } from '../context/AuthContext'
 
 const API_BASE = import.meta.env.VITE_API_URL || ''
 
+let _lastQueryAt: number | null = null
+export function getLastQueryTime(): number | null { return _lastQueryAt }
+
 function getAuthHeaders(): HeadersInit {
   const token = getStoredToken()
   return token ? { Authorization: `Bearer ${token}` } : {}
@@ -36,6 +39,7 @@ export type StreamEvent =
 export async function* queryAgentStream(
   body: QueryRequest,
 ): AsyncGenerator<StreamEvent, void, unknown> {
+  _lastQueryAt = Date.now()
   const res = await fetch(`${API_BASE}/agent/query`, {
     method: 'POST',
     headers: { ...JSON_HEADERS, ...getAuthHeaders() },
@@ -118,6 +122,19 @@ export async function getConversationHistory(
 }
 
 /** Delete a conversation session on the backend. */
+/** Check if the backend is reachable. Returns true if healthy. */
+export async function checkHealth(timeoutMs = 8000): Promise<boolean> {
+  try {
+    const controller = new AbortController()
+    const id = setTimeout(() => controller.abort(), timeoutMs)
+    const res = await fetch(`${API_BASE}/health`, { signal: controller.signal })
+    clearTimeout(id)
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 export async function deleteConversation(sessionId: string): Promise<void> {
   const res = await fetch(
     `${API_BASE}/conversations/${encodeURIComponent(sessionId)}`,
