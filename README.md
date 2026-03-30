@@ -16,9 +16,6 @@ Covers 45 software companies including:
 ![ServiceNow AI impact — full answer](docs/screenshots/now.png)
 *Cited answer: how AI has impacted ServiceNow's business*
 
-![Sources panel](docs/screenshots/now%20source.png)
-*Retrieved transcript passages for the ServiceNow query*
-
 ![Palantir US commercial revenue](docs/screenshots/pltr.png)
 *Temporal trend query across multiple quarters*
 
