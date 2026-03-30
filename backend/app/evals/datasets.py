@@ -59,14 +59,19 @@ def load_dataset(
         expected_answer = raw.get("expected_answer")
         expected_sources = raw.get("expected_sources", [])
         tags = raw.get("tags", [])
+        conversation_context = raw.get("conversation_context")
 
         if tag_filter and not any(t in tag_filter for t in tags):
             continue
 
+        inputs: dict[str, Any] = {"query": query}
+        if conversation_context:
+            inputs["conversation_context"] = conversation_context
+
         case_name = raw.get("name") or f"Case {i + 1}"
         case = Case(
             name=case_name,
-            inputs={"query": query},
+            inputs=inputs,
             expected_output=expected_answer if expected_answer else None,
             metadata={
                 "expected_sources": expected_sources,

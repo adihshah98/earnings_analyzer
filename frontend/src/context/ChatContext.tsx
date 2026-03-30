@@ -445,6 +445,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       })
 
       try {
+        let sawDone = false
         for await (const event of queryAgentStream({
           query: trimmed,
           session_id: chatId,
@@ -455,6 +456,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               payload: { chatId, text: event.text },
             })
           } else if (event.type === 'done') {
+            sawDone = true
             dispatch({
               type: 'SEND_SUCCESS_STREAM',
               payload: {
@@ -464,6 +466,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               },
             })
           }
+        }
+        if (!sawDone) {
+          dispatch({
+            type: 'SEND_ERROR',
+            payload: {
+              chatId,
+              userMessageId: userMessage.id,
+              assistantMessageId: assistantMessage.id,
+              error: 'The response ended before completion. Please try again.',
+            },
+          })
         }
       } catch (err) {
         const errorMessage =

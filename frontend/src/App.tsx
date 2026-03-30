@@ -5,7 +5,7 @@ import { LoginPage } from './components/LoginPage'
 import { Sidebar } from './components/Sidebar'
 import { ChatView } from './components/ChatView'
 import { SourcesPanel } from './components/SourcesPanel'
-import { checkHealth, getLastQueryTime } from './api/client'
+import { checkHealth, warmupBackend, getLastQueryTime } from './api/client'
 
 const IDLE_THRESHOLD = 15 * 60_000 // 15 minutes
 const POLL_INTERVAL  = 10_000       // 10s while warming
@@ -27,8 +27,8 @@ function useBackendReady(): boolean {
       }, POLL_INTERVAL)
     }
 
-    // Initial check on mount
-    checkHealth().then(ok => {
+    // Initial check on mount — use /warmup to also prime company + embedding caches
+    warmupBackend().then(ok => {
       setReady(ok)
       if (!ok) startPolling()
     })
@@ -37,10 +37,11 @@ function useBackendReady(): boolean {
     function handleVisibility() {
       if (document.visibilityState !== 'visible') return
       const last = getLastQueryTime()
-      const idle = last === null ? Infinity : Date.now() - last
+      const idle = last === null ? Date.now() - performance.timeOrigin : Date.now() - last
       if (idle > IDLE_THRESHOLD) {
-        setReady(false)
-        startPolling()
+        checkHealth().then(ok => {
+          if (!ok) { setReady(false); startPolling() }
+        })
       }
     }
 

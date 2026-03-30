@@ -336,6 +336,216 @@
       ]
     },
     {
+      "name": "multiturn_meta_margin_followup",
+      "query": "What about their operating margin?",
+      "conversation_context": [
+        "Q: What was Meta's revenue in Q3 2025? A: Meta reported revenue of $50.8 billion in Q3 2025, up 26% year-over-year."
+      ],
+      "expected_answer": "Meta reported a 40% operating margin in Q3 2025, with operating income of approximately $21.2 billion.",
+      "expected_sources": [
+        "META Earnings Call 2025-10-29"
+      ],
+      "tags": [
+        "multi_turn",
+        "single_doc",
+        "temporal",
+        "margins",
+        "META"
+      ]
+    },
+    {
+      "name": "multiturn_amzn_aws_followup",
+      "query": "What were their cloud revenues specifically?",
+      "conversation_context": [
+        "Q: How did Amazon perform in Q3 2025? A: Amazon reported total revenue of $180.2 billion in Q3 2025, growing 12% year-over-year."
+      ],
+      "expected_answer": "AWS revenue in Q3 2025 was $27.5 billion, growing 19% year-over-year.",
+      "expected_sources": [
+        "AMZN Earnings Call 2025-10-30"
+      ],
+      "tags": [
+        "multi_turn",
+        "single_doc",
+        "temporal",
+        "revenue",
+        "AMZN"
+      ]
+    },
+    {
+      "name": "multiturn_now_guidance_followup",
+      "query": "What guidance did management provide for the next quarter?",
+      "conversation_context": [
+        "Q: How did ServiceNow do last quarter? A: ServiceNow reported subscription revenues of $3.466 billion for Q4 2025, up 22% year-over-year."
+      ],
+      "expected_answer": "ServiceNow provided guidance for Q1 2026 subscription revenues in the range disclosed on the January 2026 earnings call.",
+      "expected_sources": [
+        "NOW Earnings Call 2026-01-28"
+      ],
+      "tags": [
+        "multi_turn",
+        "single_doc",
+        "temporal",
+        "guidance",
+        "NOW"
+      ]
+    },
+    {
+      "name": "bare_latest_meta_revenue",
+      "query": "What was Meta's revenue?",
+      "expected_answer": "Meta's most recent reported quarterly revenue was $50.8 billion in Q3 2025 (earnings call October 29, 2025), up 26% year-over-year.",
+      "expected_sources": [
+        "META Earnings Call 2025-10-29"
+      ],
+      "tags": [
+        "single_doc",
+        "temporal",
+        "latest",
+        "unspecified_period",
+        "revenue",
+        "META"
+      ]
+    },
+    {
+      "name": "bare_latest_ddog_results",
+      "query": "What did Datadog report?",
+      "expected_answer": "Datadog's most recent earnings call (November 6, 2025) reported Q3 2025 revenue of $886 million, up 28% year-over-year.",
+      "expected_sources": [
+        "DDOG Earnings Call 2025-11-06"
+      ],
+      "tags": [
+        "single_doc",
+        "temporal",
+        "latest",
+        "unspecified_period",
+        "revenue",
+        "DDOG"
+      ]
+    },
+    {
+      "name": "iot_q1_fy25_revenue",
+      "query": "What was Samsara's revenue in Q1 FY25?",
+      "expected_answer": "Samsara's Q1 FY2025 results (quarter ending approximately May 2024) were reported on the June 2024 earnings call. The answer should cite the fiscal quarter label and the call date.",
+      "expected_sources": [
+        "IOT Earnings Call 2024-06-06"
+      ],
+      "tags": [
+        "single_doc",
+        "temporal",
+        "fy_quarter",
+        "fy_cy_disambiguation",
+        "revenue",
+        "IOT"
+      ]
+    },
+    {
+      "name": "iot_q1_fy26_revenue",
+      "query": "What was Samsara's revenue in Q1 FY26?",
+      "expected_answer": "Samsara's Q1 FY2026 results (quarter ending approximately May 2025) were reported on the June 2025 earnings call. The answer should cite the fiscal quarter label and the call date.",
+      "expected_sources": [
+        "IOT Earnings Call 2025-06-05"
+      ],
+      "tags": [
+        "single_doc",
+        "temporal",
+        "fy_quarter",
+        "fy_cy_disambiguation",
+        "revenue",
+        "IOT"
+      ]
+    },
+    {
+      "name": "iot_fy_cy_ambiguity_q1_2025",
+      "query": "What was Samsara's Q1 2025 revenue?",
+      "expected_answer": "Samsara does not report on a calendar quarter basis. Q1 CY2025 (January–March 2025) falls within Samsara's Q4 FY2025 (ending ~February 2025), reported on the March 2025 call. The answer should resolve the fiscal-calendar mismatch explicitly.",
+      "expected_sources": [
+        "IOT Earnings Call 2025-03-06"
+      ],
+      "tags": [
+        "single_doc",
+        "temporal",
+        "fy_cy_disambiguation",
+        "revenue",
+        "IOT"
+      ]
+    },
+    {
+      "name": "temporal_now_8q_subscription_revenue",
+      "query": "How did ServiceNow's subscription revenue trend over the last 8 quarters?",
+      "expected_answer": "The answer should trace subscription revenue across 8 consecutive ServiceNow quarterly calls from Q1 2024 through Q4 2025, citing each period's figure and growth rate.",
+      "expected_sources": [
+        "NOW Earnings Call 2026-01-28",
+        "NOW Earnings Call 2025-10-29",
+        "NOW Earnings Call 2025-07-23",
+        "NOW Earnings Call 2025-04-23",
+        "NOW Earnings Call 2025-01-29",
+        "NOW Earnings Call 2024-10-23",
+        "NOW Earnings Call 2024-07-24",
+        "NOW Earnings Call 2024-04-24"
+      ],
+      "tags": [
+        "multi_doc",
+        "temporal",
+        "rolling_8q",
+        "range_query",
+        "revenue",
+        "NOW"
+      ]
+    },
+    {
+      "name": "multi_cross_company_cy_q4_2025_now_adbe",
+      "query": "Compare ServiceNow and Adobe operating margins in Q4 2025.",
+      "expected_answer": "ServiceNow Q4 2025 (calendar) results are on the January 2026 call; Adobe's fiscal Q4 2025 (ending November 2025) results are on the December 2025 call. Both should be cited with their respective operating margin figures.",
+      "expected_sources": [
+        "NOW Earnings Call 2026-01-28",
+        "ADBE Earnings Call 2025-12-10"
+      ],
+      "tags": [
+        "multi_doc",
+        "cross_company",
+        "cy_resolution",
+        "margins",
+        "NOW",
+        "ADBE"
+      ]
+    },
+    {
+      "name": "range_meta_capex_2023",
+      "query": "What was Meta's capital expenditure across 2023?",
+      "expected_answer": "The answer should compile Meta's capex figures as discussed across all four 2023 quarterly earnings calls (Q1–Q3 2023 calls plus the Q4/full-year 2023 call in February 2024), citing each quarter and the full-year total.",
+      "expected_sources": [
+        "META Earnings Call 2023-04-26",
+        "META Earnings Call 2023-07-26",
+        "META Earnings Call 2023-10-25",
+        "META Earnings Call 2024-02-01"
+      ],
+      "tags": [
+        "multi_doc",
+        "temporal",
+        "range_query",
+        "full_year",
+        "META"
+      ]
+    },
+    {
+      "name": "range_amzn_aws_revenue_2024",
+      "query": "How did Amazon's AWS revenue grow across all four quarters of 2024?",
+      "expected_answer": "The answer should cite AWS segment revenue from each of the four 2024 quarterly earnings calls, showing the growth trajectory from Q1 through Q4 2024.",
+      "expected_sources": [
+        "AMZN Earnings Call 2024-04-30",
+        "AMZN Earnings Call 2024-08-01",
+        "AMZN Earnings Call 2024-10-31",
+        "AMZN Earnings Call 2025-02-06"
+      ],
+      "tags": [
+        "multi_doc",
+        "temporal",
+        "range_query",
+        "full_year",
+        "revenue",
+        "AMZN"
+      ]
+    },
+    {
       "name": "negative_no_customer_names_amzn",
       "query": "Name three specific enterprise customers Amazon called out by name on the Q3 2025 call.",
       "expected_answer": "Specific large customer names are typically not disclosed in the earnings transcript excerpt; the answer should not invent customer names.",

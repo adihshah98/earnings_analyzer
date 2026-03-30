@@ -56,7 +56,6 @@ async def _run_retrieval_eval(
     base_url: str,
     admin_key: str,
     dataset_name: str,
-    top_k: int = 5,
 ) -> dict:
     """Call POST /evals/retrieval."""
     try:
@@ -66,7 +65,7 @@ async def _run_retrieval_eval(
         sys.exit(1)
 
     url = f"{base_url.rstrip('/')}/evals/retrieval"
-    params = {"dataset_name": dataset_name, "top_k": top_k, "progress": True}
+    params = {"dataset_name": dataset_name, "progress": True}
     headers = {"X-Admin-Key": admin_key} if admin_key else {}
     async with httpx.AsyncClient(timeout=900.0) as client:
         resp = await client.post(url, params=params, headers=headers)
@@ -74,7 +73,7 @@ async def _run_retrieval_eval(
         return resp.json()
 
 
-async def _run_retrieval_eval_local(dataset_name: str, top_k: int) -> dict:
+async def _run_retrieval_eval_local(dataset_name: str) -> dict:
     """Run retrieval eval in-process (same terminal as stderr progress lines)."""
     from app.evals.context import use_eval_chunks_context
     from app.evals.retrieval import retrieval_eval_to_dict, run_retrieval_eval
@@ -82,7 +81,6 @@ async def _run_retrieval_eval_local(dataset_name: str, top_k: int) -> dict:
     async with use_eval_chunks_context():
         result = await run_retrieval_eval(
             dataset_name=dataset_name,
-            top_k=top_k,
             progress=True,
         )
     return retrieval_eval_to_dict(result)
@@ -92,16 +90,19 @@ def _print_results(result: dict) -> None:
     scores = result.get("scores_by_mode", {})
     print(f"\nRun ID: {result.get('run_id', 'N/A')}")
     print(f"Dataset: {result.get('dataset_name')}")
-    print(f"Top-K: {result.get('top_k', 5)}")
-    print(f"Cases: {len(result.get('case_details', []))}")
+    print(f"Cases: {result.get('n_positive_cases', '?')} positive, {result.get('n_negative_cases', '?')} negative (excluded from scores)")
     print("\nOverall scores by mode:")
     for mode, s in scores.items():
         if isinstance(s, dict):
-            print(f"  {mode}:")
-            print(f"    precision@k: {s.get('precision_at_k', 0):.3f}")
-            print(f"    recall@k:    {s.get('recall_at_k', 0):.3f}")
-            print(f"    MRR:        {s.get('mrr', 0):.3f}")
-            print(f"    hit@k:      {s.get('hit_at_k', 0):.3f}")
+            n = sum(r.get("results_by_mode", {}).get(mode, {}).get("num_returned", 0)
+                    for r in result.get("case_details", []))
+            cases = len(result.get("case_details", []))
+            avg_n = n / cases if cases else 0
+            print(f"  {mode} (avg {avg_n:.1f} chunks/case):")
+            print(f"    precision: {s.get('precision', 0):.3f}")
+            print(f"    recall:    {s.get('recall', 0):.3f}")
+            print(f"    MRR:       {s.get('mrr', 0):.3f}")
+            print(f"    hit:       {s.get('hit', 0):.3f}")
 
 
 async def main() -> None:
@@ -124,13 +125,6 @@ async def main() -> None:
         "--admin-key",
         default=os.environ.get("ADMIN_KEY") or os.environ.get("ADMIN_API_KEY", ""),
         help="Admin API key (X-Admin-Key). From ADMIN_KEY or ADMIN_API_KEY env.",
-    )
-    parser.add_argument(
-        "--top-k",
-        "-k",
-        type=int,
-        default=5,
-        help="Number of chunks to retrieve per query (default: 5)",
     )
     parser.add_argument(
         "--list",
@@ -192,15 +186,13 @@ async def main() -> None:
 
     for ds_name in datasets_to_run:
         target = args.base_url if args.remote else "(in-process)"
-        print(f"\nRunning eval: dataset='{ds_name}', top_k={args.top_k} → {target}")
+        print(f"\nRunning eval: dataset='{ds_name}' → {target}")
         print("-" * 60)
         try:
             if args.remote:
-                result = await _run_retrieval_eval(
-                    args.base_url, args.admin_key, ds_name, args.top_k
-                )
+                result = await _run_retrieval_eval(args.base_url, args.admin_key, ds_name)
             else:
-                result = await _run_retrieval_eval_local(ds_name, args.top_k)
+                result = await _run_retrieval_eval_local(ds_name)
             _print_results(result)
 
             output_dir.mkdir(parents=True, exist_ok=True)

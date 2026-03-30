@@ -41,20 +41,18 @@ async def run_evaluation(dataset_name: str):
 @router.post("/retrieval")
 async def run_retrieval_evaluation(
     dataset_name: str,
-    top_k: int = 5,
     progress: bool = True,
 ):
     """Run retrieval evals comparing vector, keyword, and hybrid search modes.
 
     Uses expected_sources from each eval case as relevance ground truth.
-    Returns precision@k, recall@k, MRR, and hit@k per mode.
+    Returns precision, recall, MRR, and hit evaluated over all returned chunks.
     Uses eval_document_chunks table for retrieval (same DB, isolated table).
     """
     try:
         async with use_eval_chunks_context():
             result = await run_retrieval_eval(
                 dataset_name=dataset_name,
-                top_k=top_k,
                 progress=progress,
             )
         return retrieval_eval_to_dict(result)

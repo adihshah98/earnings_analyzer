@@ -121,13 +121,28 @@ export async function getConversationHistory(
   return handleResponse<ConversationHistoryEntry[]>(res)
 }
 
-/** Delete a conversation session on the backend. */
 /** Check if the backend is reachable. Returns true if healthy. */
 export async function checkHealth(timeoutMs = 8000): Promise<boolean> {
   try {
     const controller = new AbortController()
     const id = setTimeout(() => controller.abort(), timeoutMs)
     const res = await fetch(`${API_BASE}/health`, { signal: controller.signal })
+    clearTimeout(id)
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Warm up backend caches (company list + embedding client) and return health status.
+ * Use on initial mount so the first real query doesn't pay the cold-cache penalty.
+ */
+export async function warmupBackend(timeoutMs = 15000): Promise<boolean> {
+  try {
+    const controller = new AbortController()
+    const id = setTimeout(() => controller.abort(), timeoutMs)
+    const res = await fetch(`${API_BASE}/warmup`, { signal: controller.signal })
     clearTimeout(id)
     return res.ok
   } catch {

@@ -9,8 +9,10 @@ from app.agents.simple_rag import (
     _extract_text_from_responses_output,
     _find_closest_period,
     _fix_bare_year,
+    _fix_last_n_calendar_years,
     _fix_last_year,
     _resolve_temporal,
+    _rolling_year_count_from_text,
     _scope_cache_key,
     _strip_json_fences,
     build_resolution_note,
@@ -51,6 +53,37 @@ class TestFixBareYear:
         t = TemporalIntent(type="range", start_year=2023, end_year=2023)
         out = _fix_bare_year("something 2024 in text", t)
         assert out.start_year == 2023
+
+
+class TestFixLastNCalendarYears:
+    """'Last N years' maps to rolling N×4 calendar quarters; see _fix_last_n_calendar_years."""
+
+    def test_last_three_years_is_twelve_quarters(self):
+        t = TemporalIntent(type="latest")
+        out = _fix_last_n_calendar_years("AMZN capex over last 3 years", None, t)
+        assert out.type == "range"
+        assert out.num_quarters == 12
+        assert out.start_year is None and out.end_year is None
+
+    def test_last_three_years_words(self):
+        t = TemporalIntent(type="latest")
+        out = _fix_last_n_calendar_years("Amazon capex past three years", None, t)
+        assert out.num_quarters == 12
+
+    def test_over_the_last_two_years(self):
+        t = TemporalIntent(type="latest")
+        out = _fix_last_n_calendar_years("revenue over the last 2 years", None, t)
+        assert out.num_quarters == 8
+
+    def test_skips_bare_year_in_query(self):
+        t = TemporalIntent(type="latest")
+        out = _fix_last_n_calendar_years("capex 2024 and last 3 years", None, t)
+        assert out.type == "latest"
+
+    def test_rolling_year_count_from_text(self):
+        assert _rolling_year_count_from_text("x last 3 years y") == 3
+        assert _rolling_year_count_from_text("over the last 5 years") == 5
+        assert _rolling_year_count_from_text("last year") is None
 
 
 class TestFixLastYear:

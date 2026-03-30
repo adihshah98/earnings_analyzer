@@ -109,6 +109,33 @@ _LAST_YEAR_PHRASE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "last 3 years" / "past two years" → rolling N×4 calendar quarters (see _fix_last_n_calendar_years)
+_WORD_TO_N_YEARS: dict[str, int] = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+_ROLLING_N_YEARS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(?:last|past|previous)\s+(\d{1,2})\s+years?\b", re.IGNORECASE), "digit"),
+    (re.compile(r"\bover\s+the\s+last\s+(\d{1,2})\s+years?\b", re.IGNORECASE), "digit"),
+    (re.compile(r"\b(?:in|during)\s+the\s+last\s+(\d{1,2})\s+years?\b", re.IGNORECASE), "digit"),
+    (
+        re.compile(
+            r"\b(?:last|past|previous)\s+"
+            r"(one|two|three|four|five|six|seven|eight|nine|ten)\s+years?\b",
+            re.IGNORECASE,
+        ),
+        "word",
+    ),
+]
+
 
 def _fix_bare_year(query: str, temporal: TemporalIntent) -> TemporalIntent:
     """Override LLM temporal classification when the query contains a bare year.
@@ -172,6 +199,57 @@ def _fix_last_year(
     return temporal
 
 
+def _rolling_year_count_from_text(text: str) -> int | None:
+    """Parse N from phrases like 'last 3 years', 'past two years', 'over the last 5 years'."""
+    for pat, kind in _ROLLING_N_YEARS_PATTERNS:
+        m = pat.search(text)
+        if not m:
+            continue
+        raw = m.group(1)
+        if kind == "digit":
+            n = int(raw)
+        else:
+            n = _WORD_TO_N_YEARS.get(raw.lower())
+        if n is not None and 1 <= n <= 20:
+            return n
+    return None
+
+
+def _fix_last_n_calendar_years(
+    query: str,
+    conversation_context: list[str] | None,
+    temporal: TemporalIntent,
+) -> TemporalIntent:
+    """Map 'last 3 years' / 'past two years' to rolling N×4 calendar quarters from today.
+
+    Skips when the query names an explicit calendar year or quarter+year so
+    'revenue in 2024' stays an anchored full-year range.
+    """
+    if _BARE_YEAR_RE.search(query) or _QUARTER_YEAR_RE.search(query):
+        return temporal
+
+    combined = " ".join([*(conversation_context or []), query])
+    n_years = _rolling_year_count_from_text(combined)
+    if n_years is None:
+        return temporal
+
+    num_quarters = n_years * 4
+    logger.info(
+        "[debug] _fix_last_n_calendar_years: overriding %s → range(num_quarters=%d, rolling CY)",
+        temporal.type,
+        num_quarters,
+    )
+    temporal.type = "range"
+    temporal.num_quarters = num_quarters
+    temporal.start_year = None
+    temporal.end_year = None
+    temporal.start_quarter = None
+    temporal.end_quarter = None
+    temporal.quarter = None
+    temporal.year = None
+    return temporal
+
+
 async def _resolve_scope_via_llm(
     query: str,
     companies: list[dict[str, str]],
@@ -215,6 +293,7 @@ TEMPORAL SCOPE — classify as one of:
     - If a year span is mentioned (e.g. "from 2021 to 2023"): set start_year and end_year.
     - If a specific quarter start/end is mentioned (e.g. "from Q2 2022 to Q4 2023"): set start_year, start_quarter, end_year, end_quarter.
     - If a rolling window from today (e.g. "last 8 quarters", "revenue trend"): set only num_quarters.
+    - Phrases "last N years" / "past N years" (e.g. "last 3 years", "over the last two years") mean N×4 CALENDAR QUARTERS rolling back from today — use range with ONLY num_quarters = N×4 (e.g. last 3 years → num_quarters=12).
     - Phrases "last year", "past year", "previous year", "over the last year" mean the LAST 4 CALENDAR QUARTERS rolling back from today — use range with ONLY num_quarters=4 (no start_year/end_year). Same as "last 4 quarters" in intent.
     - start_quarter defaults to Q1, end_quarter defaults to Q4 when omitted.
 - "unspecified": genuinely no temporal reference AND not a specific metrics question (e.g. "tell me about Samsara", "what companies are available")
@@ -288,6 +367,7 @@ User query: {resolution_query}"""
 
         # Code-level override: if query contains a bare year (no quarter), force range
         temporal = _fix_bare_year(query, temporal)
+        temporal = _fix_last_n_calendar_years(query, conversation_context, temporal)
         temporal = _fix_last_year(query, conversation_context, temporal)
 
         logger.info("[debug] scope resolution: query=%r → tickers=%s, temporal=%s", query, tickers, temporal)

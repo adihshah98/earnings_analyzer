@@ -14,6 +14,7 @@ from cachetools import TTLCache
 
 from app.agents.prompt_utils import build_system_prompt, format_known_tickers
 from app.agents.simple_rag import (
+    SimpleRAGScope,
     _format_context_for_prompt,
     _rewrite_query_for_retrieval,
     _should_skip_rewrite,
@@ -75,6 +76,29 @@ def _is_greeting(query: str) -> bool:
     return bool(_GREETING_RE.match(query.strip()))
 
 
+def _is_openai_insufficient_quota(e: openai.RateLimitError) -> bool:
+    """Detect quota exhaustion; str(e) alone can miss nested error codes."""
+    if getattr(e, "code", None) == "insufficient_quota":
+        return True
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and err.get("code") == "insufficient_quota":
+            return True
+    return "insufficient_quota" in str(e).lower()
+
+
+def _user_message_for_rate_limit(e: openai.RateLimitError) -> str:
+    if _is_openai_insufficient_quota(e):
+        return (
+            "Your OpenAI account has run out of credits. Please check your billing at "
+            "platform.openai.com and try again."
+        )
+    return (
+        "The AI provider is currently rate-limiting requests. Please wait a moment and try again."
+    )
+
+
 async def _append_conversation_turn_background(
     session_id: str,
     query: str,
@@ -88,6 +112,176 @@ async def _append_conversation_turn_background(
     except Exception as e:
         logger.warning("Failed to persist conversation turn (background): %s", e)
 
+
+_CHUNKS_PER_PAIR = 3
+
+
+async def build_retrieval_plan(
+    query: str,
+    conversation_context: list[str] | None = None,
+    companies: list[dict[str, str]] | None = None,
+    available_periods: dict[str, list[Any]] | None = None,
+) -> tuple[SimpleRAGScope, list[str], dict[str, list[float]], dict[str, Any] | None]:
+    """Resolve scope, rewrite query, and pre-compute embeddings for all query variants.
+
+    Separating this from the actual retrieval lets the eval reuse the same plan
+    across multiple search modes without redundant LLM calls (scope resolution
+    and query rewriting each cost one LLM call per query).
+
+    Returns:
+        (scope, rewritten_queries, embedding_map, filter_metadata)
+    """
+    today_iso = date.today().isoformat()
+
+    if companies is None:
+        companies = await get_known_companies()
+    if available_periods is None:
+        available_periods = await get_available_periods()
+
+    async def _do_rewrite() -> list[str]:
+        if _should_skip_rewrite(query):
+            logger.info("[latency] _rewrite_query_for_retrieval: skipped (simple query)")
+            return [query]
+        return await _rewrite_query_for_retrieval(query)
+
+    scope, rewritten_queries, query_embedding = await asyncio.gather(
+        resolve_company_and_date(
+            query=query,
+            companies=companies,
+            today_iso=today_iso,
+            conversation_context=conversation_context,
+            available_periods=available_periods,
+        ),
+        _do_rewrite(),
+        generate_embedding(query),
+    )
+
+    if query not in rewritten_queries:
+        rewritten_queries.insert(0, query)
+    logger.info("[debug] rewritten_queries: %s", rewritten_queries)
+
+    other_queries = [q for q in rewritten_queries if q != query]
+    if other_queries:
+        other_embeddings = await asyncio.gather(*[generate_embedding(q) for q in other_queries])
+        embedding_map: dict[str, list[float]] = {
+            query: query_embedding,
+            **dict(zip(other_queries, other_embeddings)),
+        }
+    else:
+        embedding_map = {query: query_embedding}
+
+    if scope.ticker_date_pairs:
+        filter_metadata: dict[str, Any] | None = {"_ticker_date_pairs": scope.ticker_date_pairs}
+    elif scope.tickers:
+        filter_metadata = {"_tickers": scope.tickers}
+    else:
+        filter_metadata = None
+
+    return scope, rewritten_queries, embedding_map, filter_metadata
+
+
+async def retrieve_from_plan(
+    scope: SimpleRAGScope,
+    rewritten_queries: list[str],
+    embedding_map: dict[str, list[float]],
+    filter_metadata: dict[str, Any] | None,
+    search_mode: str,
+    threshold: float | None = None,
+) -> list[dict[str, Any]]:
+    """Execute the full production retrieval pipeline given a pre-built plan.
+
+    Runs multi-query retrieval, cross-query RRF merge, per-pair chunk selection,
+    and financial summary chunk injection. The search_mode parameter controls
+    which retrieval strategy (vector/keyword/hybrid) is used.
+
+    Use build_retrieval_plan() to obtain the inputs.
+    """
+    settings = get_settings()
+    threshold = threshold if threshold is not None else settings.retrieval_threshold
+
+    # Scale top_k so every resolved (ticker, call_date) pair has enough candidates.
+    n_pairs = len(scope.ticker_date_pairs) if scope.ticker_date_pairs else max(len(scope.tickers or []), 1)
+    top_k = min(max(8 * n_pairs, 20), 80)
+
+    t0 = time.perf_counter()
+    per_query_chunks = await asyncio.gather(*[
+        retrieve_relevant_chunks(
+            query=q,
+            top_k=top_k,
+            threshold=threshold,
+            filter_metadata=filter_metadata,
+            search_mode=search_mode,
+            query_embedding=embedding_map.get(q),
+        )
+        for q in rewritten_queries
+    ])
+    logger.info(
+        "[latency] retrieve_relevant_chunks (%d queries, mode=%s): %.3fs",
+        len(rewritten_queries), search_mode, time.perf_counter() - t0,
+    )
+
+    # Cross-query RRF merge: chunks appearing across multiple query variants rank higher.
+    ranked_lists = [
+        [(c["chunk_id"], c["similarity"]) for c in result]
+        for result in per_query_chunks if result
+    ]
+    merged_rrf = rrf_merge(ranked_lists)
+    id_to_chunk: dict[str, dict] = {}
+    for result in per_query_chunks:
+        for c in result:
+            cid = c["chunk_id"]
+            if cid not in id_to_chunk or c["similarity"] > id_to_chunk[cid]["similarity"]:
+                id_to_chunk[cid] = c
+    rrf_pool = [id_to_chunk[cid] for cid, _ in merged_rrf if cid in id_to_chunk]
+
+    # Per-pair selection: 3 chunks per (ticker, date) pair; top 8 for single-pair queries.
+    if scope.ticker_date_pairs and len(scope.ticker_date_pairs) > 1:
+        chunks: list[dict] = []
+        per_pair_counts: dict[tuple, int] = {}
+        target_pairs = {(t, d) for t, d in scope.ticker_date_pairs}
+        for chunk in rrf_pool:
+            meta = chunk.get("metadata") or {}
+            pair = (meta.get("company_ticker"), meta.get("call_date"))
+            if pair not in target_pairs:
+                continue
+            if per_pair_counts.get(pair, 0) < _CHUNKS_PER_PAIR:
+                chunks.append(chunk)
+                per_pair_counts[pair] = per_pair_counts.get(pair, 0) + 1
+            if (
+                len(per_pair_counts) == len(target_pairs)
+                and all(v >= _CHUNKS_PER_PAIR for v in per_pair_counts.values())
+            ):
+                break
+    else:
+        chunks = rrf_pool[:8]
+
+    # Always inject financial summary chunks for resolved (ticker, call_date) pairs.
+    if scope.ticker_date_pairs:
+        covered_pairs = list(scope.ticker_date_pairs)
+    else:
+        covered_pairs = []
+        seen_pairs: set[tuple[str, str]] = set()
+        for chunk in chunks:
+            meta = chunk.get("metadata") or {}
+            t = meta.get("company_ticker", "")
+            d = meta.get("call_date", "")
+            if t and d and (t, d) not in seen_pairs:
+                seen_pairs.add((t, d))
+                covered_pairs.append((t, d))
+
+    if covered_pairs:
+        t0 = time.perf_counter()
+        financials_chunks = await get_financials_chunks_for_pairs(covered_pairs)
+        logger.info(
+            "[latency] get_financials_chunks_for_pairs (%d pairs): %.3fs",
+            len(covered_pairs), time.perf_counter() - t0,
+        )
+        existing_ids = {c["chunk_id"] for c in chunks}
+        for fc in financials_chunks:
+            if fc["chunk_id"] not in existing_ids:
+                chunks.append(fc)
+
+    return chunks
 
 
 async def _prepare_simple_rag(
@@ -141,130 +335,25 @@ async def _prepare_simple_rag(
     conversation_context = merged[-5:] if merged else None
     logger.info("[debug] conversation_context: %s", conversation_context)
 
-    # Run scope resolution, (optional) query rewriting, and embedding in parallel.
-    # Rewriting is skipped for short/simple queries to save an LLM round-trip.
-    async def _maybe_rewrite() -> list[str]:
-        if _should_skip_rewrite(query):
-            logger.info("[latency] _rewrite_query_for_retrieval: skipped (simple query)")
-            return [query]
-        return await _rewrite_query_for_retrieval(query)
-
     t0 = time.perf_counter()
-    scope, rewritten_queries, query_embedding = await asyncio.gather(
-        resolve_company_and_date(
-            query=query, companies=companies, today_iso=today_iso,
-            conversation_context=conversation_context,
-            available_periods=available_periods,
-        ),
-        _maybe_rewrite(),
-        generate_embedding(query),
+    scope, rewritten_queries, embedding_map, filter_metadata = await build_retrieval_plan(
+        query=query,
+        conversation_context=conversation_context,
+        companies=companies,
+        available_periods=available_periods,
     )
-    logger.info("[latency] resolve_scope + rewrite + embedding (parallel): %.3fs", time.perf_counter() - t0)
+    logger.info("[latency] build_retrieval_plan: %.3fs", time.perf_counter() - t0)
 
-    # Ensure the original query is always in the retrieval set so its
-    # pre-computed embedding is actually used (rewrites rarely match it verbatim).
-    if query not in rewritten_queries:
-        rewritten_queries.insert(0, query)
-    logger.info("[debug] rewritten_queries: %s", rewritten_queries)
-
-    # Build filter_metadata: ticker_date_pairs is most specific, then tickers-only
-    if scope.ticker_date_pairs:
-        filter_metadata = {"_ticker_date_pairs": scope.ticker_date_pairs}
-    elif scope.tickers:
-        filter_metadata = {"_tickers": scope.tickers}
-    else:
-        filter_metadata = None
-
-    effective_mode = search_mode or settings.default_search_mode
-    threshold = retrieval_threshold if retrieval_threshold is not None else settings.retrieval_threshold
-    # Scale per-query top_k with the number of resolved pairs so every pair
-    # has enough candidates in the pool for per-pair selection downstream.
-    n_pairs = len(scope.ticker_date_pairs) if scope.ticker_date_pairs else max(len(scope.tickers or []), 1)
-    top_k = min(max(8 * n_pairs, 20), 80)
-
-    # Pre-compute embeddings for all rewritten queries in parallel so each
-    # retrieve_relevant_chunks call can reuse its embedding instead of regenerating it.
     t0 = time.perf_counter()
-    other_queries = [q for q in rewritten_queries if q != query]
-    if other_queries:
-        other_embeddings = await asyncio.gather(*[generate_embedding(q) for q in other_queries])
-        embedding_map = {query: query_embedding, **dict(zip(other_queries, other_embeddings))}
-    else:
-        embedding_map = {query: query_embedding}
-
-    per_query_chunks = await asyncio.gather(*[
-        retrieve_relevant_chunks(
-            query=q,
-            top_k=top_k,
-            threshold=threshold,
-            filter_metadata=filter_metadata,
-            search_mode=effective_mode,
-            query_embedding=embedding_map.get(q),
-        )
-        for q in rewritten_queries
-    ])
-    logger.info("[latency] retrieve_relevant_chunks (%d queries): %.3fs", len(rewritten_queries), time.perf_counter() - t0)
-
-    # Cross-query RRF merge: chunks appearing in multiple query variants rank higher.
-    ranked_lists = [
-        [(c["chunk_id"], c["similarity"]) for c in result]
-        for result in per_query_chunks if result
-    ]
-    merged_rrf = rrf_merge(ranked_lists)
-    id_to_chunk: dict[str, dict] = {}
-    for result in per_query_chunks:
-        for c in result:
-            cid = c["chunk_id"]
-            if cid not in id_to_chunk or c["similarity"] > id_to_chunk[cid]["similarity"]:
-                id_to_chunk[cid] = c
-    rrf_pool = [id_to_chunk[cid] for cid, _ in merged_rrf if cid in id_to_chunk]
-
-    # Per-pair selection: 3 regular chunks per (ticker, date) pair in RRF rank order,
-    # guaranteeing coverage across all pairs. Single-pair queries get top 8 globally.
-    _CHUNKS_PER_PAIR = 3
-    if scope.ticker_date_pairs and len(scope.ticker_date_pairs) > 1:
-        chunks: list[dict] = []
-        per_pair_counts: dict[tuple, int] = {}
-        target_pairs = {(t, d) for t, d in scope.ticker_date_pairs}
-        for chunk in rrf_pool:
-            meta = chunk.get("metadata") or {}
-            pair = (meta.get("company_ticker"), meta.get("call_date"))
-            if pair not in target_pairs:
-                continue
-            if per_pair_counts.get(pair, 0) < _CHUNKS_PER_PAIR:
-                chunks.append(chunk)
-                per_pair_counts[pair] = per_pair_counts.get(pair, 0) + 1
-            if (
-                len(per_pair_counts) == len(target_pairs)
-                and all(v >= _CHUNKS_PER_PAIR for v in per_pair_counts.values())
-            ):
-                break
-    else:
-        chunks = rrf_pool[:8]
-
-    # Always include financial summary chunks for resolved (ticker, call_date) pairs.
-    # When temporal resolution succeeded, use all resolved pairs; otherwise extract from results.
-    if scope.ticker_date_pairs:
-        covered_pairs = list(scope.ticker_date_pairs)
-    else:
-        covered_pairs = []
-        seen_pairs: set[tuple[str, str]] = set()
-        for chunk in chunks:
-            meta = chunk.get("metadata") or {}
-            t = meta.get("company_ticker", "")
-            d = meta.get("call_date", "")
-            if t and d and (t, d) not in seen_pairs:
-                seen_pairs.add((t, d))
-                covered_pairs.append((t, d))
-
-    if covered_pairs:
-        t0 = time.perf_counter()
-        financials_chunks = await get_financials_chunks_for_pairs(covered_pairs)
-        logger.info("[latency] get_financials_chunks_for_pairs (%d pairs): %.3fs", len(covered_pairs), time.perf_counter() - t0)
-        existing_ids = {c["chunk_id"] for c in chunks}
-        for fc in financials_chunks:
-            if fc["chunk_id"] not in existing_ids:
-                chunks.append(fc)
+    chunks = await retrieve_from_plan(
+        scope=scope,
+        rewritten_queries=rewritten_queries,
+        embedding_map=embedding_map,
+        filter_metadata=filter_metadata,
+        search_mode=search_mode or settings.default_search_mode,
+        threshold=retrieval_threshold,
+    )
+    logger.info("[latency] retrieve_from_plan: %.3fs", time.perf_counter() - t0)
 
     chunks = trim_chunks_to_token_budget(chunks)
     chunks = reorder_chunks_for_range(chunks, scope)
@@ -423,12 +512,38 @@ async def stream_simple_rag_or_agent(
         return
 
     t_prepare = time.perf_counter()
-    chunks, full_prompt, _, prior_turns, llm_query = await _prepare_simple_rag(
-        query=query,
-        search_mode=search_mode,
-        retrieval_threshold=retrieval_threshold,
-        session_id=session_id,
-    )
+    try:
+        chunks, full_prompt, _, prior_turns, llm_query = await _prepare_simple_rag(
+            query=query,
+            search_mode=search_mode,
+            retrieval_threshold=retrieval_threshold,
+            session_id=session_id,
+        )
+    except openai.RateLimitError as e:
+        # Embeddings / scope LLM run before the stream try/except; must still emit done for the UI.
+        logger.warning("Rate limit during prepare (embedding or scope resolution): %s", e)
+        msg = _user_message_for_rate_limit(e)
+        yield "delta", msg
+        yield "done", {
+            "answer": msg,
+            "sources": [],
+            "citations": [],
+            "reasoning": None,
+            "tool_calls_made": [],
+        }
+        return
+    except Exception as e:
+        logger.exception("Prepare phase failed: %s", e)
+        msg = "[Error while generating response.]"
+        yield "delta", msg
+        yield "done", {
+            "answer": msg,
+            "sources": [],
+            "citations": [],
+            "reasoning": None,
+            "tool_calls_made": [],
+        }
+        return
     logger.info("[latency] prepare (to first LLM call): %.3fs", time.perf_counter() - t_prepare)
 
     client = get_openai_client()
@@ -467,11 +582,9 @@ async def stream_simple_rag_or_agent(
                     accumulated.append(delta)
                     yield "delta", delta
     except Exception as e:
-        err_str = str(e).lower()
-        if isinstance(e, openai.RateLimitError) and "insufficient_quota" in err_str:
-            msg = "Your OpenAI account has run out of credits. Please check your billing at platform.openai.com and try again."
-        elif isinstance(e, openai.RateLimitError):
-            msg = "The AI provider is currently rate-limiting requests. Please wait a moment and try again."
+        if isinstance(e, openai.RateLimitError):
+            logger.warning("Rate limit during answer stream: %s", e)
+            msg = _user_message_for_rate_limit(e)
         else:
             logger.exception("Streaming completion failed: %s", e)
             msg = "[Error while generating response.]"

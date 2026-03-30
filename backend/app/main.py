@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -107,3 +108,21 @@ async def health():
         "version": "0.1.0",
         "database": db_health,
     }
+
+
+@app.get("/warmup")
+async def warmup():
+    """Warm up in-process caches (companies list + embedding client) and return health status.
+
+    Called by the frontend on initial mount. Idempotent — uses cached values if already warm.
+    Ensures the first real user query doesn't pay the cold-cache penalty even if the lifespan
+    warmup failed (e.g. DB not ready during Render cold start).
+    """
+    results = await asyncio.gather(
+        health_check(),
+        get_known_companies(),
+        generate_embedding("warmup"),
+        return_exceptions=True,
+    )
+    db_health = results[0] if not isinstance(results[0], Exception) else {"status": "error"}
+    return {"status": "ok", "database": db_health}

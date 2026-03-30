@@ -8,9 +8,10 @@ from tqdm import tqdm
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.agents.streaming import build_retrieval_plan, retrieve_from_plan
 from app.evals.datasets import load_dataset
 from app.evals.metrics import _llm_judge
-from app.rag.retriever import retrieve_relevant_chunks
+from app.rag.retriever import get_available_periods, get_known_companies
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +22,12 @@ _relevance_cache: dict[str, bool] = {}
 
 @dataclass
 class RetrievalModeScores:
-    """Per-mode retrieval metrics."""
+    """Per-mode retrieval metrics — all evaluated over the full returned set."""
 
-    precision_at_k: float = 0.0
-    recall_at_k: float = 0.0
-    mrr: float = 0.0
-    hit_at_k: float = 0.0
+    precision: float = 0.0   # relevant / n_returned
+    recall: float = 0.0      # sources_found / expected_sources
+    mrr: float = 0.0         # 1 / rank_of_first_relevant
+    hit: float = 0.0         # 1 if any relevant chunk returned
 
 
 @dataclass
@@ -35,7 +36,6 @@ class RetrievalEvalResult:
 
     run_id: str
     dataset_name: str
-    top_k: int
     scores_by_mode: dict[str, RetrievalModeScores] = field(default_factory=dict)
     scores_by_tag: dict[str, dict[str, RetrievalModeScores]] = field(default_factory=dict)
     case_details: list[dict[str, Any]] = field(default_factory=list)
@@ -45,10 +45,25 @@ def _cache_key(query: str, content: str) -> str:
     return hashlib.sha256(f"{query}|||{content}".encode()).hexdigest()
 
 
-def _title_matches(chunk: dict[str, Any], expected_sources: list[str]) -> bool:
-    """Check if a chunk's title matches one of the expected sources."""
-    title = chunk.get("metadata", {}).get("title")
-    return title in expected_sources if title and expected_sources else False
+def _source_matches(chunk: dict[str, Any], expected_sources: list[str]) -> bool:
+    """Check if a chunk comes from one of the expected source documents.
+
+    Matches on metadata.title first; falls back to reconstructing the title
+    from (company_ticker, call_date) so minor title format variations don't
+    cause false misses.
+    """
+    if not expected_sources:
+        return False
+    meta = chunk.get("metadata", {})
+    title = meta.get("title")
+    if title and title in expected_sources:
+        return True
+    # Fallback: reconstruct canonical title from ticker + call_date
+    ticker = meta.get("company_ticker", "")
+    call_date = meta.get("call_date", "")
+    if ticker and call_date:
+        return f"{ticker} Earnings Call {call_date}" in expected_sources
+    return False
 
 
 async def _is_chunk_relevant(
@@ -56,12 +71,10 @@ async def _is_chunk_relevant(
     chunk: dict[str, Any],
     expected_sources: list[str],
 ) -> bool:
-    """Check chunk relevance using both title matching and LLM-judged content relevance.
-
-    A chunk is relevant if its title matches an expected source AND the LLM
-    judge confirms its content helps answer the query.
+    """Check chunk relevance: must come from an expected source document AND
+    be judged helpful by the LLM.
     """
-    if not _title_matches(chunk, expected_sources):
+    if not _source_matches(chunk, expected_sources):
         return False
 
     content = chunk.get("content", "").strip()
@@ -97,31 +110,48 @@ async def _compute_metrics(
     query: str,
     chunks: list[dict[str, Any]],
     expected_sources: list[str],
-    top_k: int,
 ) -> tuple[float, float, float, float]:
-    """Compute precision@k, recall@k, MRR, hit@k for a single query.
+    """Compute precision, recall, MRR, hit over ALL returned chunks.
 
-    precision@k and MRR use LLM-judged content relevance.
-    recall@k uses expected_sources (did we find the right documents?).
+    The production pipeline returns a variable-size set (8 for single-pair,
+    3×n_pairs + n_pairs financials for multi-pair), so there is no meaningful
+    fixed k. All four metrics are evaluated over the full returned list.
+
+    - precision  = relevant_chunks / n_returned
+    - recall     = sources_found / expected_sources
+    - MRR        = 1 / rank_of_first_relevant
+    - hit        = 1 if any relevant chunk is returned
     """
-    top_chunks = chunks[:top_k]
+    if not chunks:
+        return 0.0, 0.0, 0.0, 0.0
 
-    relevance_flags = [await _is_chunk_relevant(query, c, expected_sources) for c in top_chunks]
-    num_relevant = sum(relevance_flags)
+    # Run the cheap source-match gate first; only call the LLM judge when
+    # the chunk comes from an expected source document.
+    flags = []
+    for c in chunks:
+        if _source_matches(c, expected_sources):
+            flags.append(await _is_chunk_relevant(query, c, expected_sources))
+        else:
+            flags.append(False)
 
-    precision = num_relevant / top_k if top_k else 0.0
+    num_relevant = sum(flags)
+    n = len(chunks)
 
-    # recall: how many expected source documents appear in the results
+    precision = num_relevant / n
+
     num_expected = len(expected_sources) if expected_sources else 1
     sources_found = {
-        c.get("metadata", {}).get("title")
-        for c, is_rel in zip(top_chunks, relevance_flags)
-        if is_rel and c.get("metadata", {}).get("title")
+        c.get("metadata", {}).get("title") or (
+            f"{c.get('metadata', {}).get('company_ticker', '')} Earnings Call "
+            f"{c.get('metadata', {}).get('call_date', '')}"
+        )
+        for c, is_rel in zip(chunks, flags)
+        if is_rel
     } & set(expected_sources)
-    recall = len(sources_found) / num_expected if num_expected else 0.0
+    recall = len(sources_found) / num_expected
 
     mrr = 0.0
-    for i, is_rel in enumerate(relevance_flags):
+    for i, is_rel in enumerate(flags):
         if is_rel:
             mrr = 1.0 / (i + 1)
             break
@@ -145,23 +175,22 @@ def _chunk_to_serializable(chunk: dict[str, Any], relevant: bool | None = None) 
 
 async def run_retrieval_eval(
     dataset_name: str,
-    top_k: int = 5,
     save_chunks: bool = False,
     tag_filter: list[str] | None = None,
     progress: bool = True,
 ) -> RetrievalEvalResult:
     """Run retrieval evals across vector, keyword, and hybrid modes.
 
-    Calls retrieve_relevant_chunks directly (bypasses the LLM agent) so
-    metrics reflect actual retriever quality, not agent citation behavior.
-    Uses LLM-as-judge for chunk relevance and expected_sources for recall.
+    Mirrors the full production retrieval pipeline (entity resolution, query
+    rewriting, filter_metadata, RRF merge, per-pair selection, financials
+    injection) and evaluates precision, recall, MRR, and hit over the complete
+    returned set — no fixed top_k cutoff.
 
     Args:
-        dataset_name: Eval dataset name (e.g. acme_eval).
-        top_k: Number of results to retrieve per query.
+        dataset_name: Eval dataset name (e.g. prod_tickers_eval).
         save_chunks: If True, include retrieved chunks in case_details for debugging.
-        tag_filter: If set, only run cases whose tags contain at least one match.
-        progress: If True, show a tqdm progress bar over cases (no per-query text).
+        tag_filter: If set, only run cases whose tags contain at least one of these.
+        progress: If True, show a tqdm progress bar over cases.
 
     Returns:
         RetrievalEvalResult with scores by mode and per-case details.
@@ -170,6 +199,11 @@ async def run_retrieval_eval(
 
     run_id = str(uuid.uuid4())[:8]
     dataset = load_dataset(dataset_name, tag_filter=tag_filter)
+
+    # Pre-fetch companies and available periods once for the whole run;
+    # both respect the eval chunks context so they return eval-table data.
+    companies = await get_known_companies()
+    available_periods = await get_available_periods()
 
     modes: list[str] = ["vector", "keyword", "hybrid"]
     mode_scores: dict[str, list[tuple[float, float, float, float]]] = {
@@ -185,8 +219,7 @@ async def run_retrieval_eval(
             cases_to_run.append(case)
 
     logger.info(
-        f"Starting retrieval eval {run_id}: dataset='{dataset_name}', "
-        f"cases={len(cases_to_run)}, top_k={top_k}"
+        f"Starting retrieval eval {run_id}: dataset='{dataset_name}', cases={len(cases_to_run)}"
     )
 
     n_cases = len(cases_to_run)
@@ -201,44 +234,67 @@ async def run_retrieval_eval(
         )
     for _, case in case_iter:
         query = case.inputs.get("query", "") if isinstance(case.inputs, dict) else str(case.inputs)
+        conversation_context: list[str] | None = (
+            case.inputs.get("conversation_context") if isinstance(case.inputs, dict) else None
+        )
         case_meta = case.metadata if isinstance(case.metadata, dict) else {}
         expected_sources: list[str] = case_meta.get("expected_sources", [])
         tags: list[str] = case_meta.get("tags", [])
+
+        # Cases with no expected_sources are adversarial/negative probes
+        # (e.g. "Tesla Q3 2025", "Q1 2000 Amazon", "Datadog dividend") where
+        # the correct answer is "no data available". Their metrics are recorded
+        # in case_details for visibility but excluded from aggregate scores so
+        # they don't deflate precision/recall/hit on positive cases.
+        is_negative = not expected_sources
 
         case_result: dict[str, Any] = {
             "query": query,
             "expected_sources": expected_sources,
             "tags": tags,
+            "is_negative_case": is_negative,
             "results_by_mode": {},
         }
 
+        # Build the retrieval plan once per case: resolves entity/temporal scope,
+        # rewrites the query, and pre-computes embeddings. Reused across all modes
+        # so scope resolution and query rewriting run only once per case.
+        scope, rewritten_queries, embedding_map, filter_metadata = await build_retrieval_plan(
+            query=query,
+            conversation_context=conversation_context,
+            companies=companies,
+            available_periods=available_periods,
+        )
+
         for mode in modes:
-            chunks = await retrieve_relevant_chunks(
-                query=query,
-                top_k=top_k,
+            chunks = await retrieve_from_plan(
+                scope=scope,
+                rewritten_queries=rewritten_queries,
+                embedding_map=embedding_map,
+                filter_metadata=filter_metadata,
                 search_mode=mode,
             )
             prec, rec, mrr, hit = await _compute_metrics(
-                query, chunks, expected_sources, top_k
+                query, chunks, expected_sources
             )
-            mode_scores[mode].append((prec, rec, mrr, hit))
-            for tag in tags:
-                if tag not in tag_mode_scores:
-                    tag_mode_scores[tag] = {m: [] for m in modes}
-                tag_mode_scores[tag][mode].append((prec, rec, mrr, hit))
+            if not is_negative:
+                mode_scores[mode].append((prec, rec, mrr, hit))
+                for tag in tags:
+                    if tag not in tag_mode_scores:
+                        tag_mode_scores[tag] = {m: [] for m in modes}
+                    tag_mode_scores[tag][mode].append((prec, rec, mrr, hit))
             mode_result: dict[str, Any] = {
                 "num_returned": len(chunks),
-                "precision_at_k": prec,
-                "recall_at_k": rec,
+                "precision": prec,
+                "recall": rec,
                 "mrr": mrr,
-                "hit_at_k": hit,
+                "hit": hit,
             }
             if save_chunks:
-                top_chunks = chunks[:top_k]
-                relevance_flags = [await _is_chunk_relevant(query, c, expected_sources) for c in top_chunks]
+                relevance_flags = [await _is_chunk_relevant(query, c, expected_sources) for c in chunks]
                 mode_result["chunks"] = [
                     _chunk_to_serializable(c, rel)
-                    for c, rel in zip(top_chunks, relevance_flags)
+                    for c, rel in zip(chunks, relevance_flags)
                 ]
             case_result["results_by_mode"][mode] = mode_result
 
@@ -251,10 +307,10 @@ async def run_retrieval_eval(
             return RetrievalModeScores()
         n = len(lst)
         return RetrievalModeScores(
-            precision_at_k=sum(x[0] for x in lst) / n,
-            recall_at_k=sum(x[1] for x in lst) / n,
+            precision=sum(x[0] for x in lst) / n,
+            recall=sum(x[1] for x in lst) / n,
             mrr=sum(x[2] for x in lst) / n,
-            hit_at_k=sum(x[3] for x in lst) / n,
+            hit=sum(x[3] for x in lst) / n,
         )
 
     scores_by_mode: dict[str, RetrievalModeScores] = {
@@ -270,14 +326,15 @@ async def run_retrieval_eval(
     result = RetrievalEvalResult(
         run_id=run_id,
         dataset_name=dataset_name,
-        top_k=top_k,
         scores_by_mode=scores_by_mode,
         scores_by_tag=scores_by_tag,
         case_details=case_details,
     )
 
+    n_positive = sum(1 for c in case_details if not c.get("is_negative_case"))
+    n_negative = len(case_details) - n_positive
     logger.info(
-        f"Retrieval eval {run_id} complete: "
+        f"Retrieval eval {run_id} complete: {n_positive} positive cases, {n_negative} negative skipped. "
         f"vector={scores_by_mode.get('vector')}, "
         f"keyword={scores_by_mode.get('keyword')}, "
         f"hybrid={scores_by_mode.get('hybrid')}"
@@ -287,19 +344,22 @@ async def run_retrieval_eval(
 
 def _mode_scores_to_dict(s: RetrievalModeScores) -> dict[str, float]:
     return {
-        "precision_at_k": s.precision_at_k,
-        "recall_at_k": s.recall_at_k,
+        "precision": s.precision,
+        "recall": s.recall,
         "mrr": s.mrr,
-        "hit_at_k": s.hit_at_k,
+        "hit": s.hit,
     }
 
 
 def retrieval_eval_to_dict(result: RetrievalEvalResult) -> dict[str, Any]:
     """Convert RetrievalEvalResult to API-serializable dict."""
+    n_positive = sum(1 for c in result.case_details if not c.get("is_negative_case"))
+    n_negative = len(result.case_details) - n_positive
     out: dict[str, Any] = {
         "run_id": result.run_id,
         "dataset_name": result.dataset_name,
-        "top_k": result.top_k,
+        "n_positive_cases": n_positive,
+        "n_negative_cases": n_negative,
         "scores_by_mode": {
             mode: _mode_scores_to_dict(s)
             for mode, s in result.scores_by_mode.items()
@@ -307,10 +367,15 @@ def retrieval_eval_to_dict(result: RetrievalEvalResult) -> dict[str, Any]:
         "case_details": result.case_details,
     }
     if result.scores_by_tag:
+        tag_case_counts: dict[str, int] = {}
+        for c in result.case_details:
+            if not c.get("is_negative_case"):
+                for tag in c.get("tags", []):
+                    tag_case_counts[tag] = tag_case_counts.get(tag, 0) + 1
         out["scores_by_tag"] = {
             tag: {
-                mode: _mode_scores_to_dict(s)
-                for mode, s in tag_modes.items()
+                "n_cases": tag_case_counts.get(tag, 0),
+                **{mode: _mode_scores_to_dict(s) for mode, s in tag_modes.items()},
             }
             for tag, tag_modes in result.scores_by_tag.items()
         }
