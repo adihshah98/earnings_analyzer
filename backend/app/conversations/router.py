@@ -23,6 +23,10 @@ class SessionSummary(BaseModel):
     session_id: str = Field(..., description="Session ID")
     updated_at: datetime | None = Field(None, description="Last activity time")
     title: str | None = Field(None, description="Chat title from first user message")
+    message_count: int = Field(
+        0,
+        description="Number of messages in this session (for list UI before history is loaded)",
+    )
 
 
 class HistoryEntry(BaseModel):
@@ -39,8 +43,13 @@ async def get_sessions(user: dict = Depends(require_user)):
     """List conversation sessions for the authenticated user, newest first."""
     rows = await list_sessions(user_id=user["sub"])
     return [
-        SessionSummary(session_id=session_id, updated_at=updated_at, title=title)
-        for session_id, updated_at, title in rows
+        SessionSummary(
+            session_id=session_id,
+            updated_at=updated_at,
+            title=title,
+            message_count=message_count,
+        )
+        for session_id, updated_at, title, message_count in rows
     ]
 
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useChatContext } from '../context/ChatContext'
+import { displayMessageCount } from '../utils/helpers'
 import { MessageBubble } from './MessageBubble'
 import { ChatInput } from './ChatInput'
 
@@ -13,7 +14,7 @@ export function ChatView() {
     if (el) {
       el.scrollTop = el.scrollHeight
     }
-  }, [activeChat?.messages.length])
+  }, [activeChat?.messages.length, activeChat?.messageCount])
 
   if (!activeChat) {
     return (
@@ -34,14 +35,15 @@ export function ChatView() {
     )
   }
 
+  const headerCount = displayMessageCount(activeChat)
+
   return (
     <main className="main-panel">
       <header className="chat-header">
         <div>
           <div className="chat-header-title">{activeChat.title || 'Conversation'}</div>
           <div className="chat-header-subtitle">
-            {activeChat.messages.length} message
-            {activeChat.messages.length === 1 ? '' : 's'}
+            {headerCount} message{headerCount === 1 ? '' : 's'}
           </div>
         </div>
       </header>
@@ -72,7 +74,8 @@ export function ChatView() {
             }
           />
         ))}
-        {activeChat.messages.length === 0 && (
+        {activeChat.messages.length === 0 &&
+          displayMessageCount(activeChat) === 0 && (
           <div className="empty-state" style={{ alignItems: 'flex-start' }}>
             Ask a question like “What did ACME guide for revenue in Q3 2024?” to get started.
           </div>

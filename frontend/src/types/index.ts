@@ -41,6 +41,8 @@ export interface ConversationSessionSummary {
   session_id: string
   updated_at: string | null
   title: string | null
+  /** Row count from server; matches history length once loaded */
+  message_count: number
 }
 
 /** Backend conversation history entry */
@@ -65,6 +67,8 @@ export interface ChatSession {
   id: string
   title: string
   messages: ChatMessage[]
+  /** Set from session list when messages are not yet loaded (e.g. after refresh). */
+  messageCount?: number
 }
 
 /** Single chunk in a full-transcript response */

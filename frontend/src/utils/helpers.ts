@@ -7,6 +7,14 @@ export function createSessionId(): string {
   })
 }
 
+import type { ChatSession } from '../types'
+
+/** Message count for sidebar/header when history may not be hydrated yet. */
+export function displayMessageCount(chat: ChatSession): number {
+  if (chat.messages.length > 0) return chat.messages.length
+  return chat.messageCount ?? 0
+}
+
 export function truncateTitle(text: string, maxLength = 40): string {
   const trimmed = text.trim()
   if (trimmed.length <= maxLength) return trimmed || 'New chat'

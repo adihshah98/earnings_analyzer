@@ -309,6 +309,8 @@ CASH BALANCE: $868.4M as of end of Q1 FY2026
 
 Always output FISCAL_QUARTER on the first line. Look at the transcript heading/title (e.g. "Q3 2021 Earnings Call") or any early mention of the quarter to determine this — it does not need to be explicitly labeled "fiscal quarter" in the text. Output it in the format Q{N} FY{YYYY} (e.g. Q1 FY2026, Q3 FY2021).
 Be concise — metrics and figures only, no narrative commentary.\
+
+Company Specific: Meta sometimes calls it's total quarterly revenue as "Family of Apps revenue"
 """
 
 

@@ -155,13 +155,16 @@ async def append_conversation_turn(
     logger.debug(f"Appended turn to session {session_id}")
 
 
-async def list_sessions(user_id: str | None = None) -> list[tuple[str, object, str | None]]:
-    """List conversation session IDs with their last activity time and title.
+async def list_sessions(
+    user_id: str | None = None,
+) -> list[tuple[str, object, str | None, int]]:
+    """List conversation session IDs with their last activity time, title, and row count.
 
     If user_id is provided, returns only sessions belonging to that user.
 
     Returns:
-        List of (session_id, updated_at, title) tuples, newest first.
+        List of (session_id, updated_at, title, message_count) tuples, newest first.
+        message_count is the number of stored rows (user + assistant entries) for the session.
         Title is read directly from the stored title column — no deserialization needed.
     """
     import uuid as _uuid
@@ -170,15 +173,18 @@ async def list_sessions(user_id: str | None = None) -> list[tuple[str, object, s
         q = select(
             ConversationMessage.session_id,
             func.max(ConversationMessage.created_at).label("updated_at"),
+            func.count(ConversationMessage.id).label("message_count"),
         )
         if user_id:
             q = q.where(ConversationMessage.user_id == _uuid.UUID(user_id))
         q = q.group_by(ConversationMessage.session_id)
         subq = q.subquery()
         result = await session.execute(
-            select(subq.c.session_id, subq.c.updated_at).order_by(
-                subq.c.updated_at.desc().nulls_last()
-            )
+            select(
+                subq.c.session_id,
+                subq.c.updated_at,
+                subq.c.message_count,
+            ).order_by(subq.c.updated_at.desc().nulls_last())
         )
         rows = list(result.all())
         session_ids = [r[0] for r in rows]
@@ -208,7 +214,7 @@ async def list_sessions(user_id: str | None = None) -> list[tuple[str, object, s
         title_result = await session.execute(first_title_q)
         titles = {r[0]: r[1] for r in title_result.all()}
 
-    return [(sid, updated_at, titles.get(sid)) for sid, updated_at in rows]
+    return [(sid, updated_at, titles.get(sid), int(cnt)) for sid, updated_at, cnt in rows]
 
 
 async def delete_session(session_id: str) -> None:

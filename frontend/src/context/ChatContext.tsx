@@ -5,6 +5,8 @@ import {
   useEffect,
   useMemo,
   useReducer,
+  useRef,
+  useState,
 } from 'react'
 import {
   deleteConversation,
@@ -13,7 +15,12 @@ import {
   queryAgentStream,
 } from '../api/client'
 import type { AgentResponse, ChatMessage, ChatSession } from '../types'
-import { createSessionId, loadFromStorage, saveToStorage, truncateTitle } from '../utils/helpers'
+import {
+  createSessionId,
+  loadFromStorage,
+  saveToStorage,
+  truncateTitle,
+} from '../utils/helpers'
 
 type ChatState = {
   chats: ChatSession[]
@@ -106,6 +113,7 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
             ? {
                 ...chat,
                 messages,
+                messageCount: messages.length,
                 ...(title !== undefined ? { title } : {}),
               }
             : chat,
@@ -316,6 +324,10 @@ function persistState(state: ChatState): void {
 
 export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(chatReducer, initialState)
+  /** Avoid writing empty initial state to localStorage before session list/hydration runs. */
+  const [initialSyncDone, setInitialSyncDone] = useState(false)
+  const chatsRef = useRef(state.chats)
+  chatsRef.current = state.chats
 
   // Load from backend on first mount; fall back to localStorage on failure
   useEffect(() => {
@@ -327,6 +339,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           id: s.session_id,
           title: s.title ? truncateTitle(s.title) : 'Chat',
           messages: [],
+          messageCount: s.message_count ?? 0,
         }))
         const stored = loadFromStorage<StoredState>()
         const activeChatId =
@@ -351,48 +364,51 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           })
         }
       })
+      .finally(() => {
+        if (!cancelled) setInitialSyncDone(true)
+      })
     return () => {
       cancelled = true
     }
   }, [])
 
-  // When active chat has no messages, load history from backend
+  // Hydrate every chat that has no messages yet (sidebar counts + open tab) in parallel.
   useEffect(() => {
-    const chatId = state.activeChatId
-    const chat = chatId ? state.chats.find((c) => c.id === chatId) : null
-    if (!chatId || !chat || chat.messages.length > 0) return
-    let cancelled = false
-    getConversationHistory(chatId)
-      .then((entries) => {
-        if (cancelled) return
-        const messages: ChatMessage[] = entries.map((e) => ({
-          id: createSessionId(),
-          role: e.role as 'user' | 'assistant',
-          content: e.content,
-          createdAt: e.created_at ?? new Date().toISOString(),
-          sources: e.sources ?? undefined,
-        }))
-        const firstUser = entries.find((e) => e.role === 'user')
-        const title = firstUser?.content
-          ? truncateTitle(firstUser.content)
-          : undefined
-        dispatch({
-          type: 'SET_CHAT_MESSAGES',
-          payload: { chatId, messages, title },
-        })
-      })
-      .catch(() => {
-        // ignore: leave messages empty
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [state.activeChatId, state.chats])
+    if (!initialSyncDone) return
+    const need = state.chats.filter((c) => c.messages.length === 0)
+    if (need.length === 0) return
+    void Promise.all(
+      need.map((chat) =>
+        getConversationHistory(chat.id).then((entries) => {
+          const latest = chatsRef.current.find((c) => c.id === chat.id)
+          if (!latest || latest.messages.length > 0) return
+          const messages: ChatMessage[] = entries.map((e) => ({
+            id: createSessionId(),
+            role: e.role as 'user' | 'assistant',
+            content: e.content,
+            createdAt: e.created_at ?? new Date().toISOString(),
+            sources: e.sources ?? undefined,
+          }))
+          const firstUser = entries.find((e) => e.role === 'user')
+          const title = firstUser?.content
+            ? truncateTitle(firstUser.content)
+            : undefined
+          dispatch({
+            type: 'SET_CHAT_MESSAGES',
+            payload: { chatId: chat.id, messages, title },
+          })
+        }),
+      ),
+    ).catch(() => {
+      // leave empty; user can retry by switching chats
+    })
+  }, [state.chats, initialSyncDone])
 
-  // Persist on change (cache for offline / fallback)
+  // Persist on change (cache for offline / fallback) — never clobber storage with pre-sync empty state
   useEffect(() => {
+    if (!initialSyncDone) return
     persistState(state)
-  }, [state])
+  }, [state, initialSyncDone])
 
   const createNewChat = useCallback(() => {
     const id = createSessionId()
