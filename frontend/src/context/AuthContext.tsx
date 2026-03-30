@@ -20,6 +20,7 @@ interface AuthContextValue {
   user: AuthUser | null
   token: string | null
   isLoading: boolean
+  authError: string | null
   login: () => void
   logout: () => void
 }
@@ -58,11 +59,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [token, setToken] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [authError, setAuthError] = useState<string | null>(null)
 
   useEffect(() => {
-    // Check if Google just redirected back with a token in the URL
+    // Check if Google just redirected back with a token or error in the URL
     const params = new URLSearchParams(window.location.search)
     const urlToken = params.get('token')
+    const urlError = params.get('auth_error')
 
     if (urlToken) {
       localStorage.setItem(TOKEN_KEY, urlToken)
@@ -70,6 +73,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const decoded = decodeJwt(urlToken)
       setToken(urlToken)
       setUser(decoded)
+    } else if (urlError) {
+      window.history.replaceState({}, '', window.location.pathname)
+      setAuthError(urlError)
     } else {
       const stored = localStorage.getItem(TOKEN_KEY)
       if (stored && !isTokenExpired(stored)) {
@@ -96,7 +102,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, logout }}>
+    <AuthContext.Provider value={{ user, token, isLoading, authError, login, logout }}>
       {children}
     </AuthContext.Provider>
   )

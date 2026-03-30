@@ -60,7 +60,7 @@ function WarmingBanner({ ready }: { ready: boolean }) {
   return (
     <div className="warming-banner">
       <span className="warming-banner__dot" />
-      Backend warming up…
+      Backend warming up. Will take roughly 2 minutes because of free tier limitations…
     </div>
   )
 }

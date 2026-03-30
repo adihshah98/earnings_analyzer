@@ -52,8 +52,14 @@ Migrations run automatically on container startup (`alembic upgrade head` before
 | `EMBEDDING_MODEL` | No | Default: `text-embedding-3-small` |
 | `EMBEDDING_DIMENSIONS` | No | Default: `1536` |
 | `CORS_ORIGINS` | No | Comma-separated origins; default: `http://localhost:5173` |
-| `ADMIN_API_KEY` | No | For ingest/eval routes; empty = unprotected |
+| `ADMIN_API_KEY` | No | For ingest/eval routes; empty = unprotected (dev default) |
 | `LOG_LEVEL` | No | Default: `INFO` |
 | `PORT` | No | Port to bind; set by Railway/Cloud Run |
+| `GOOGLE_CLIENT_ID` | No | Google OAuth app client ID; auth disabled if empty |
+| `GOOGLE_CLIENT_SECRET` | No | Google OAuth app client secret |
+| `JWT_SECRET` | If auth enabled | HS256 signing key for session JWTs |
+| `JWT_EXPIRE_DAYS` | No | Default: `30` |
+| `FRONTEND_URL` | If auth enabled | OAuth redirect base (e.g. `https://your-frontend.com`) |
+| `BACKEND_URL` | If auth enabled | OAuth callback base (e.g. `https://your-api.com`) |
 
 Chat completions always use **`gpt-4.1-mini`** (`DEFAULT_OPENAI_MODEL` in `app/config.py`). The `OPENAI_MODEL` environment variable is ignored.

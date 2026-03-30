@@ -1,196 +1,216 @@
-# 🧠 KB Agent — Production Knowledge Base Agent
+# Earnings Analyzer
 
-A production-grade FastAPI service that provides an AI-powered knowledge base agent with:
-- **PydanticAI agents** with tool use (search, calculate, summarize)
-- **RAG pipeline** using Supabase pgvector for semantic search
-- **Prompt versioning** with A/B testing and rollback
-- **Structured output validation** via Pydantic models
-- **Eval harness** for systematic agent quality testing
+A production RAG agent for querying earnings call transcripts. Ask natural-language questions across companies and quarters — it resolves entities, retrieves relevant transcript passages, and streams cited answers.
 
-> For detailed technical documentation (architecture, workflows, components), see [ARCHITECTURE.md](ARCHITECTURE.md).
+**[Live Demo →](https://earnings-analyzer-frontend-vr0j.onrender.com/)**
+
+Covers 45 software companies including:
+`ADBE` `AI` `AMZN` `APPF` `ASAN` `CFLT` `CRM` `CRWD` `CXM` `DDOG` `DOCU` `DOCN` `DT` `FRSH` `GOOGL` `GTLB` `HUBS` `IOT` `KVYO` `MDB` `META` `MNDY` `MSFT` `NET` `NOW` `NTNX` `NVDA` `OKTA` `PANW` `PATH` `PAYC` `PCOR` `PCTY` `PLTR` `RBRK` `SAIL` `SHOP` `SNOW` `TEAM` `TOST` `TTAN` `TWLO` `VEEV` `WDAY` `ZS`
+
+> **Access is invite-only.** The live demo is rate-limited to keep API costs manageable. To request access, email [adihshah@gmail.com](mailto:adihshah@gmail.com) with your Google account address.
+
+---
+
+## Screenshots
+
+![ServiceNow AI impact — full answer](docs/screenshots/now.png)
+*Cited answer: how AI has impacted ServiceNow's business*
+
+![Sources panel](docs/screenshots/now%20source.png)
+*Retrieved transcript passages for the ServiceNow query*
+
+![Palantir US commercial revenue](docs/screenshots/pltr.png)
+*Temporal trend query across multiple quarters*
+
+## What it does
+
+- Ask questions like _"How did Apple describe their Services margin in the last two quarters?"_ or _"Compare AMD and NVIDIA's data center commentary in Q3 FY2025"_
+- Resolves tickers, fiscal quarters, and natural-language dates ("last quarter", "Q3 FY2026") to exact call dates in the database
+- Retrieves the most relevant transcript passages using hybrid search (vector + full-text), then generates a streaming, source-cited answer
+- Maintains multi-turn conversation context within a session
+
+## Features
+
+- **Hybrid RAG pipeline** — pgvector cosine similarity + PostgreSQL full-text search fused via Reciprocal Rank Fusion (RRF)
+- **Entity & temporal resolution** — maps natural language to exact `(ticker, call_date)` pairs via a cheap LLM call against actual call dates in the DB
+- **Speaker-aware ingestion** — chunks transcripts along speaker turns with role/metadata preservation
+- **Multi-turn conversation** — session-based history with in-memory buffer for immediate context
+- **SSE streaming** — token-by-token response delivery with final cited source payload
+- **Fiscal calendar awareness** — 49 tickers with company-specific fiscal year end mappings
+- **Eval harness** — retrieval evals (precision/recall/MRR/hit rate), agent evals (faithfulness/relevance/completeness via LLM judges)
+- **Google OAuth** — JWT-based auth with per-user session isolation and invite-only access control
+
+> For deep technical documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+---
 
 ## Architecture
 
 ```
-Earnings Analyzer/
+earnings_analyzer/
 ├── backend/
-│   ├── app/                    # FastAPI application
+│   ├── app/
 │   │   ├── main.py
 │   │   ├── config.py
-│   │   ├── agents/, rag/, evals/, models/, tools/, conversations/, prompts/
-│   │   └── ingestion/
+│   │   ├── agents/           # RAG pipeline, entity resolution, streaming
+│   │   ├── rag/              # Retriever, ingestion, embeddings, fiscal calendar
+│   │   ├── evals/            # Eval runner, retrieval evals, LLM judges
+│   │   ├── auth/             # Google OAuth, JWT, invite allowlist
+│   │   ├── conversations/    # Session history service
+│   │   ├── models/           # SQLAlchemy models + Pydantic schemas
+│   │   └── prompts/          # System prompt templates
 │   ├── scripts/
-│   │   ├── seed_transcript.py  # Seed transcripts from eval_data/*.json (local)
-│   │   ├── run_evals.py        # Agent evals via POST /evals/run
-│   │   ├── run_retrieval_evals.py  # Retrieval evals via POST /evals/retrieval
-│   │   ├── smoke_test.py
-│   │   └── show_chunks.py
-│   ├── eval_data/              # Transcript JSON files for seeding
-│   ├── eval_datasets/          # Eval case definitions
+│   │   ├── batch_ingest_transcripts.py   # Bulk ingest .docx transcripts
+│   │   ├── seed_transcript.py            # Seed JSON eval data
+│   │   ├── run_evals.py                  # Agent eval runner
+│   │   ├── run_retrieval_evals.py        # Retrieval eval runner
+│   │   └── reextract_financials.py       # Re-extract financial summaries
+│   ├── transcripts/          # .docx transcripts: {TICKER}/{YYYY-MM-DD}.docx
 │   ├── tests/
 │   ├── alembic/
-│   ├── pyproject.toml
-│   ├── requirements.txt
-│   ├── alembic.ini
 │   └── .env.example
-├── frontend/                   # React + Vite
+├── frontend/                 # React + Vite (TypeScript)
 └── README.md
 ```
 
-## Setup
+## Request Flow
 
-### Prerequisites
-- Python 3.11+
-- OpenAI API key
-- PostgreSQL with pgvector (Supabase, Render Postgres, or self-hosted)
-
-### Database Setup
-
-**Option A: Use Alembic migrations (recommended)**
-
-```bash
-cd backend && alembic upgrade head
 ```
-
-**Option B: Run SQL manually**
-
-If you prefer not to use Alembic, run this SQL in your PostgreSQL database (Supabase SQL editor, Render Postgres console, or psql):
-
-```sql
--- Enable pgvector
-create extension if not exists vector;
-
--- Document chunks for RAG
-create table document_chunks (
-    id uuid default gen_random_uuid() primary key,
-    content text not null,
-    metadata jsonb default '{}',
-    embedding vector(1536),
-    source_doc_id text,
-    chunk_index integer,
-    created_at timestamptz default now()
-);
-
--- Index for similarity search
-create index on document_chunks
-using ivfflat (embedding vector_cosine_ops)
-with (lists = 100);
-
--- Prompt versions
-create table prompt_versions (
-    id uuid default gen_random_uuid() primary key,
-    name text not null,
-    version integer not null,
-    template text not null,
-    is_active boolean default false,
-    weight float default 0.0,
-    metadata jsonb default '{}',
-    created_at timestamptz default now(),
-    unique(name, version)
-);
-
--- Eval results
-create table eval_results (
-    id uuid default gen_random_uuid() primary key,
-    run_id text not null,
-    dataset_name text not null,
-    prompt_version_id uuid references prompt_versions(id),
-    scores jsonb not null,
-    details jsonb default '{}',
-    created_at timestamptz default now()
-);
-
--- Match function for similarity search
-create or replace function match_documents(
-    query_embedding vector(1536),
-    match_threshold float,
-    match_count int
-)
-returns table (
-    id uuid,
-    content text,
-    metadata jsonb,
-    similarity float
-)
-language sql stable
-as $$
-    select
-        document_chunks.id,
-        document_chunks.content,
-        document_chunks.metadata,
-        1 - (document_chunks.embedding <=> query_embedding) as similarity
-    from document_chunks
-    where 1 - (document_chunks.embedding <=> query_embedding) > match_threshold
-    order by (document_chunks.embedding <=> query_embedding)
-    limit match_count;
-$$;
-```
-
-### Install & Run
-
-```bash
-# Clone and setup
-python -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-pip install -r backend/requirements.txt
-
-# Configure backend
-cp backend/.env.example backend/.env
-# Edit backend/.env: OPENAI_API_KEY, DATABASE_URL (postgresql+asyncpg://...)
-
-# Run migrations
-cd backend && alembic upgrade head
-
-# Seed transcripts (from backend/)
-cd backend && python scripts/seed_transcript.py
-# Or with --eval to ingest into eval_document_chunks
-
-# Run the API server (from backend/)
-cd backend && uvicorn app.main:app --reload --port 8000
-
-# Run evals (calls the deployed API — start server first)
-cd backend && python scripts/run_evals.py [dataset]
-cd backend && python scripts/run_retrieval_evals.py [dataset]
-# Use --base-url https://api.example.com for remote; defaults to http://localhost:8000
+User query (React)
+  → POST /agent/query (SSE stream)
+  → stream_simple_rag_or_agent()
+      1. _resolve_entities_via_llm()     — gpt-4.1-mini extracts (ticker, date) pairs
+                                           from query + recent session context
+      2. retrieve_relevant_chunks()      — hybrid RRF search, per-pair chunk selection,
+                                           financial summary injection
+      3. OpenAI LLM call (streaming)    — generates answer with [Source N] citations
+  → SSE "delta" events (tokens) + "done" event (full AgentResponse with sources)
+  → Session saved to DB asynchronously
 ```
 
 ---
 
-## API Endpoints
+## Self-Hosting
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/agent/query` | Query the KB agent (SSE stream: deltas + final payload) |
-| GET | `/conversations/{session_id}/history` | Get conversation history for a session |
-| POST | `/rag/ingest` | Ingest documents |
-| POST | `/rag/search` | Direct semantic search (supports search_mode: vector, keyword, hybrid) |
-| GET | `/prompts/` | List all prompt versions |
-| POST | `/prompts/` | Create new prompt version |
-| PUT | `/prompts/{name}/activate` | Activate a prompt version |
-| POST | `/evals/run` | Run eval suite |
-| POST | `/evals/compare` | Compare two prompt versions (bootstrap CI) |
-| POST | `/evals/retrieval` | Compare retrieval quality across vector/keyword/hybrid modes |
-| GET | `/evals/comparisons` | Get stored comparison results |
-| GET | `/evals/dashboard` | HTML dashboard for prompt comparisons |
-| GET | `/evals/results` | Get eval results |
-| GET | `/health` | Health check |
+### Prerequisites
+- Python 3.11+
+- Node.js 18+
+- OpenAI API key
+- PostgreSQL with pgvector (Supabase, Render Postgres, or self-hosted)
+- Google OAuth credentials (for auth; see [Google Cloud Console](https://console.cloud.google.com/))
 
-## Docker deployment
+### Backend
 
-To deploy the backend with Docker (e.g. Railway), see [backend/DEPLOY.md](backend/DEPLOY.md). Summary:
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r backend/requirements.txt
+
+cp backend/.env.example backend/.env
+# Fill in: OPENAI_API_KEY, DATABASE_URL, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, JWT_SECRET, ADMIN_API_KEY
+
+cd backend && alembic upgrade head
+cd backend && uvicorn app.main:app --reload --port 8000
+```
+
+### Frontend
+
+```bash
+cd frontend && npm install
+
+# Create frontend/.env.local
+echo "VITE_API_URL=http://localhost:8000" > frontend/.env.local
+
+npm run dev   # http://localhost:5173
+```
+
+### Ingest transcripts
+
+Place `.docx` transcript files under `backend/transcripts/{TICKER}/{YYYY-MM-DD}.docx`, then:
+
+```bash
+cd backend && python scripts/batch_ingest_transcripts.py
+```
+
+### Access control
+
+By default, the first user to sign in will be approved (any users already in the DB when you run migrations are grandfathered). To approve a new user:
+
+```bash
+# User must have signed in at least once (creates their DB row)
+curl -X POST https://your-backend.com/auth/set-approval \
+  -H "X-Admin-Key: YOUR_ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "someone@gmail.com", "approved": true}'
+
+# Pre-approve before they sign in (creates a stub record)
+curl -X POST https://your-backend.com/auth/set-approval \
+  -H "X-Admin-Key: YOUR_ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "someone@gmail.com", "approved": true}'
+
+# Revoke access
+curl -X POST https://your-backend.com/auth/set-approval \
+  -H "X-Admin-Key: YOUR_ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "someone@gmail.com", "approved": false}'
+```
+
+### Docker
 
 ```bash
 cd backend
 docker build -t earnings-analyzer-backend .
-# Set DATABASE_URL, OPENAI_API_KEY, CORS_ORIGINS
-docker run -p 8000:8000 -e DATABASE_URL=... -e OPENAI_API_KEY=... earnings-analyzer-backend
+docker run -p 8000:8000 \
+  -e DATABASE_URL=postgresql+asyncpg://... \
+  -e OPENAI_API_KEY=sk-... \
+  -e ADMIN_API_KEY=your-secret \
+  -e CORS_ORIGINS='["https://your-frontend.com"]' \
+  earnings-analyzer-backend
 ```
 
-Migrations run on container startup automatically.
+Alembic migrations run automatically on container startup. See [backend/DEPLOY.md](backend/DEPLOY.md) for full deployment notes.
+
+---
+
+## API Reference
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/agent/query` | Query the RAG agent — SSE stream of delta tokens + final `AgentResponse` |
+| GET | `/warmup` | Pre-warm in-process caches (companies, embeddings) |
+| GET | `/health` | Database health check |
+| **Auth** | | |
+| GET | `/auth/google` | Redirect to Google OAuth consent screen |
+| GET | `/auth/google/callback` | OAuth callback — exchanges code, issues JWT |
+| GET | `/auth/me` | Return current user (requires `Authorization: Bearer <jwt>`) |
+| POST | `/auth/set-approval` | Approve or revoke a user by email (requires `X-Admin-Key`) |
+| **Conversations** | | |
+| GET | `/conversations/sessions` | List sessions for authenticated user |
+| GET | `/conversations/{session_id}/history` | Get conversation history with sources |
+| DELETE | `/conversations/{session_id}` | Delete a session |
+| **RAG** (admin) | | |
+| POST | `/rag/ingest/manual/upload` | Upload `.docx` transcript |
+| POST | `/rag/search` | Direct hybrid/vector/keyword search |
+| **Evals** (admin) | | |
+| POST | `/evals/run` | Run agent eval suite |
+| POST | `/evals/retrieval` | Run retrieval evals (precision/recall/MRR) |
+
+> Admin-protected routes require `X-Admin-Key: <ADMIN_API_KEY>`. Set `ADMIN_API_KEY=""` in `.env` to disable protection in dev.
+
+---
 
 ## Tech Stack
-- **Framework:** FastAPI + Pydantic
-- **Agent:** PydanticAI (with OpenAI)
-- **Embeddings:** OpenAI text-embedding-3-small
-- **Database:** PostgreSQL via asyncpg + SQLAlchemy + pgvector
-- **Eval:** Pydantic Evals
+
+| Layer | Technology |
+|-------|-----------|
+| Framework | FastAPI + Pydantic |
+| LLM | OpenAI gpt-4.1-mini |
+| Embeddings | OpenAI text-embedding-3-small (1536 dims) |
+| Vector search | PostgreSQL + pgvector (ivfflat) |
+| Full-text search | PostgreSQL TSVector + `websearch_to_tsquery` |
+| Ranking | Reciprocal Rank Fusion (RRF, K=60) |
+| Auth | Google OAuth 2.0 + HS256 JWT |
+| ORM | SQLAlchemy (async) + asyncpg |
+| Migrations | Alembic |
+| Frontend | React + Vite (TypeScript) |
+| Deployment | Render (backend + frontend) |

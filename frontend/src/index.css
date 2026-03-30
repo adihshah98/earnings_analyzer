@@ -58,7 +58,7 @@ button {
   padding: 8px 16px;
   background: #fff8ed;
   border-bottom: 1px solid #f0d9a8;
-  font-size: 13px;
+  font-size: 14px;
   color: #7a5c1e;
   flex-shrink: 0;
 }
@@ -116,6 +116,11 @@ button {
   line-height: 1.5;
 }
 
+.login-subtitle--error {
+  color: #b91c1c;
+  font-weight: 500;
+}
+
 .login-google-btn {
   display: flex;
   align-items: center;
@@ -134,6 +139,11 @@ button {
 .login-google-btn:hover {
   background: #f8f9fa;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+}
+
+.login-google-btn--secondary {
+  background: #f8f9fa;
+  color: #6b6560;
 }
 
 .google-icon {

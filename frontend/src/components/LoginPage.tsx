@@ -1,19 +1,36 @@
 import { useAuth } from '../context/AuthContext'
 
 export function LoginPage() {
-  const { login } = useAuth()
+  const { login, authError } = useAuth()
 
   return (
     <div className="login-page">
       <div className="login-card">
         <h1 className="login-title">Earnings Analyzer</h1>
-        <p className="login-subtitle">
-          Ask questions about earnings calls and financial transcripts.
-        </p>
-        <button className="login-google-btn" onClick={login}>
-          <GoogleIcon />
-          Sign in with Google
-        </button>
+        {authError === 'not_approved' ? (
+          <>
+            <p className="login-subtitle login-subtitle--error">
+              This app is invite-only. Your account hasn't been approved yet.
+            </p>
+            <p className="login-subtitle">
+              Contact the owner to request access, then try signing in again.
+            </p>
+            <button className="login-google-btn login-google-btn--secondary" onClick={login}>
+              <GoogleIcon />
+              Try a different account
+            </button>
+          </>
+        ) : (
+          <>
+            <p className="login-subtitle">
+              Ask questions about earnings calls and financial transcripts.
+            </p>
+            <button className="login-google-btn" onClick={login}>
+              <GoogleIcon />
+              Sign in with Google
+            </button>
+          </>
+        )}
       </div>
     </div>
   )

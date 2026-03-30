@@ -34,6 +34,10 @@ async def upsert_user(google_id: str, email: str, name: str, avatar_url: str | N
         result = await session.execute(select(User).where(User.google_id == google_id))
         user = result.scalar_one_or_none()
         if user is None:
+            # Fall back to email match — picks up pre-approved stub records
+            result = await session.execute(select(User).where(User.email == email))
+            user = result.scalar_one_or_none()
+        if user is None:
             user = User(
                 id=uuid.uuid4(),
                 google_id=google_id,
@@ -43,6 +47,7 @@ async def upsert_user(google_id: str, email: str, name: str, avatar_url: str | N
             )
             session.add(user)
         else:
+            user.google_id = google_id  # stamp real google_id onto stub if needed
             user.email = email
             user.name = name
             user.avatar_url = avatar_url
@@ -56,5 +61,6 @@ async def upsert_user(google_id: str, email: str, name: str, avatar_url: str | N
             email=user.email,
             name=user.name,
             avatar_url=user.avatar_url,
+            is_approved=user.is_approved,
         )
     return user_data
